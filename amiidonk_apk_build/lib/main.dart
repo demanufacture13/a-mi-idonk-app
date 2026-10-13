@@ -100,6 +100,7 @@ class _NewsAppState extends State<NewsApp> {
     setState(() => mode = value);
   }
   @override Widget build(BuildContext context) => MaterialApp(
+    navigatorKey: notificationNavigatorKey,
     title:'A MI IDŐNK', debugShowCheckedModeBanner:false,
     themeMode:mode,
     theme:ThemeData(useMaterial3:true,colorSchemeSeed:brandRed,brightness:Brightness.light,appBarTheme:const AppBarTheme(backgroundColor:brandRed,foregroundColor:Colors.white)),
