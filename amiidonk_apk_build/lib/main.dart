@@ -1,0 +1,179 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+import 'package:html/parser.dart' as html_parser;
+import 'package:flutter_html/flutter_html.dart';
+
+const baseUrl = 'https://www.amiidonk.hu';
+const brandRed = Color(0xFFD20A12);
+// Állítsd be a hírlevél tényleges feliratkozási URL-jét az élesítés előtt.
+const newsletterUrl = '$baseUrl';
+
+void main() => runApp(const NewsApp());
+
+String plain(String markup) => html_parser.parse(markup).body?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+
+// WordPress lazy-loading images often keep the actual URL in data-src,
+// data-lazy-src or srcset. Normalize them before passing HTML to flutter_html.
+String articleHtml(String markup) {
+  final fragment = html_parser.parseFragment(markup);
+  for (final img in fragment.querySelectorAll('img')) {
+    String url = '';
+    for (final key in ['data-src', 'data-lazy-src', 'data-original', 'data-orig-file', 'src']) {
+      final value = (img.attributes[key] ?? '').trim();
+      if (value.isNotEmpty && !value.startsWith('data:image/svg') &&
+          !value.startsWith('data:image/gif;base64')) { url = value; break; }
+    }
+    if (url.isEmpty) {
+      final srcset = img.attributes['data-srcset'] ?? img.attributes['srcset'] ?? '';
+      if (srcset.isNotEmpty) url = srcset.split(',').first.trim().split(RegExp(r'\s+')).first;
+    }
+    if (url.isNotEmpty) {
+      img.attributes['src'] = Uri.parse(baseUrl).resolve(url).toString();
+      img.attributes.remove('srcset');
+      img.attributes.remove('data-srcset');
+    }
+    img.attributes.remove('loading');
+  }
+  return fragment.outerHtml;
+}
+
+class NewsApi {
+  static Future<List<dynamic>> posts({int? category, String search = ''}) async {
+    final q = <String,String>{'per_page':'30','_embed':'1'};
+    if (category != null) q['categories'] = '$category';
+    if (search.trim().isNotEmpty) q['search'] = search.trim();
+    final url = Uri.parse('$baseUrl/wp-json/wp/v2/posts').replace(queryParameters:q);
+    final res = await http.get(url).timeout(const Duration(seconds:18));
+    if (res.statusCode != 200) throw Exception('A hírek nem érhetők el (${res.statusCode}).');
+    return jsonDecode(res.body) as List<dynamic>;
+  }
+  static Future<List<dynamic>> categories() async {
+    final url = Uri.parse('$baseUrl/wp-json/wp/v2/categories?per_page=100&hide_empty=true');
+    final res = await http.get(url).timeout(const Duration(seconds:18));
+    if (res.statusCode != 200) throw Exception('Kategóriák: ${res.statusCode}');
+    return jsonDecode(res.body) as List<dynamic>;
+  }
+}
+
+String imageFor(dynamic post) {
+  try { return post['_embedded']['wp:featuredmedia'][0]['source_url'] as String? ?? ''; }
+  catch (_) { return ''; }
+}
+
+class NewsApp extends StatefulWidget {
+  const NewsApp({super.key});
+  @override State<NewsApp> createState() => _NewsAppState();
+}
+class _NewsAppState extends State<NewsApp> {
+  ThemeMode mode = ThemeMode.system;
+  @override void initState() { super.initState(); _load(); }
+  Future<void> _load() async {
+    final p = await SharedPreferences.getInstance();
+    if (mounted) setState(() => mode = ThemeMode.values[p.getInt('theme') ?? 0]);
+  }
+  Future<void> setMode(ThemeMode value) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('theme', value.index);
+    setState(() => mode = value);
+  }
+  @override Widget build(BuildContext context) => MaterialApp(
+    title:'A MI IDŐNK', debugShowCheckedModeBanner:false,
+    themeMode:mode,
+    theme:ThemeData(useMaterial3:true,colorSchemeSeed:brandRed,brightness:Brightness.light,appBarTheme:const AppBarTheme(backgroundColor:brandRed,foregroundColor:Colors.white)),
+    darkTheme:ThemeData(useMaterial3:true,colorSchemeSeed:brandRed,brightness:Brightness.dark),
+    home: HomePage(mode:mode,onMode:setMode),
+  );
+}
+
+class HomePage extends StatefulWidget {
+  final ThemeMode mode;
+  final ValueChanged<ThemeMode> onMode;
+  const HomePage({super.key,required this.mode,required this.onMode});
+  @override State<HomePage> createState() => _HomePageState();
+}
+class _HomePageState extends State<HomePage> {
+  int tab = 0;
+  int? category;
+  String search = '';
+  late Future<List<dynamic>> posts;
+  late Future<List<dynamic>> categories;
+  @override void initState() { super.initState(); reload(); categories=NewsApi.categories(); }
+  void reload() => posts=NewsApi.posts(category:category,search:search);
+  @override Widget build(BuildContext context) => Scaffold(
+    appBar:AppBar(title:const Text('☆ A MI IDŐNK',style:TextStyle(fontWeight:FontWeight.w900)),actions:[IconButton(icon:const Icon(Icons.search),onPressed:()=>showSearch(context:context,delegate:NewsSearchDelegate()))]),
+    body: tab == 0 ? _news() : tab == 1 ? _categories() : tab == 2 ? const SavedPage() : _settings(),
+    bottomNavigationBar:NavigationBar(selectedIndex:tab,onDestinationSelected:(v)=>setState(()=>tab=v),destinations:const [
+      NavigationDestination(icon:Icon(Icons.home_outlined),selectedIcon:Icon(Icons.home),label:'Hírek'),
+      NavigationDestination(icon:Icon(Icons.category_outlined),label:'Kategóriák'),
+      NavigationDestination(icon:Icon(Icons.bookmark_outline),label:'Kedvencek'),
+      NavigationDestination(icon:Icon(Icons.settings_outlined),label:'Beállítások'),
+    ]),
+  );
+  Widget _news() => RefreshIndicator(onRefresh:() async { setState(reload); await posts; },child:FutureBuilder<List<dynamic>>(future:posts,builder:(context,snapshot){
+    if (!snapshot.hasData) { if(snapshot.hasError) return ListView(children:[const SizedBox(height:80),const Icon(Icons.wifi_off,size:44),Center(child:Padding(padding:const EdgeInsets.all(16),child:Text('${snapshot.error}',textAlign:TextAlign.center))),TextButton(onPressed:()=>setState(reload),child:const Text('Újrapróbálás'))]); return const Center(child:CircularProgressIndicator()); }
+    final items=snapshot.data!;
+    if(items.isEmpty) return ListView(children:const [SizedBox(height:90),Center(child:Text('Nincs találat.'))]);
+    return ListView.builder(itemCount:items.length,itemBuilder:(context,i)=>NewsTile(post:items[i]));
+  }));
+  Widget _categories() => FutureBuilder<List<dynamic>>(future:categories,builder:(context,s){
+    if(s.hasError) return Center(child:Text('Nem sikerült betölteni a kategóriákat: ${s.error}'));
+    if(!s.hasData) return const Center(child:CircularProgressIndicator());
+    return ListView(children:[ListTile(title:const Text('Összes hír'),onTap:()=>setState((){category=null;search='';reload();tab=0;})),...s.data!.map((c)=>ListTile(title:Text(plain(c['name'] ?? '')),trailing:const Icon(Icons.chevron_right),onTap:()=>setState((){category=c['id'] as int;search='';reload();tab=0;})))]);
+  });
+  Widget _settings() => ListView(children:[
+    const ListTile(title:Text('Megjelenés',style:TextStyle(fontWeight:FontWeight.bold))),
+    RadioListTile<ThemeMode>(title:const Text('Rendszer szerint'),value:ThemeMode.system,groupValue:widget.mode,onChanged:(v)=>widget.onMode(v!)),
+    RadioListTile<ThemeMode>(title:const Text('Világos'),value:ThemeMode.light,groupValue:widget.mode,onChanged:(v)=>widget.onMode(v!)),
+    RadioListTile<ThemeMode>(title:const Text('Sötét'),value:ThemeMode.dark,groupValue:widget.mode,onChanged:(v)=>widget.onMode(v!)),
+    const Divider(),ListTile(leading:const Icon(Icons.mail_outline),title:const Text('Hírlevél-feliratkozás'),subtitle:const Text('Feliratkozás a weboldalon'),onTap:()=>launchUrl(Uri.parse(newsletterUrl),mode:LaunchMode.externalApplication)),
+    const ListTile(leading:Icon(Icons.notifications_outlined),title:Text('Értesítések'),subtitle:Text('Élesítéshez Firebase-beállítás szükséges')),
+    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.0'),
+  ]);
+}
+
+class NewsTile extends StatelessWidget {
+  final dynamic post;
+  const NewsTile({super.key,required this.post});
+  @override Widget build(BuildContext context) {
+    final image=imageFor(post);
+    return Card(margin:const EdgeInsets.symmetric(horizontal:10,vertical:6),clipBehavior:Clip.antiAlias,child:InkWell(onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>ArticlePage(post:post))),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      if(image.isNotEmpty) Image.network(image,height:190,width:double.infinity,fit:BoxFit.cover,errorBuilder:(_,__,___)=>const SizedBox.shrink()),
+      Padding(padding:const EdgeInsets.all(14),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(plain(post['title']['rendered'] ?? ''),style:Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight:FontWeight.bold)),const SizedBox(height:8),Text(plain(post['excerpt']['rendered'] ?? ''),maxLines:3,overflow:TextOverflow.ellipsis),const SizedBox(height:8),Text((post['date'] ?? '').toString().replaceAll('T','  '),style:Theme.of(context).textTheme.bodySmall)]))
+    ])));
+  }
+}
+
+class ArticlePage extends StatefulWidget {
+  final dynamic post;
+  const ArticlePage({super.key,required this.post});
+  @override State<ArticlePage> createState()=>_ArticlePageState();
+}
+class _ArticlePageState extends State<ArticlePage> {
+  final tts=FlutterTts();
+  bool speaking=false, saved=false;
+  String get id => '${widget.post['id']}';
+  @override void initState(){super.initState();_load();tts.setLanguage('hu-HU');tts.setSpeechRate(0.48);tts.setCompletionHandler(() { if (mounted) setState(() => speaking = false); });}
+  Future<void> _load() async {final p=await SharedPreferences.getInstance();if(mounted)setState(()=>saved=(p.getStringList('saved')??[]).contains(id));}
+  Future<void> _toggleSaved() async {final p=await SharedPreferences.getInstance();final ids=p.getStringList('saved')??[];if(ids.contains(id)){ids.remove(id);}else{ids.add(id);await p.setString('article_$id',jsonEncode(widget.post));}await p.setStringList('saved',ids);setState(()=>saved=ids.contains(id));}
+  Future<void> _toggleTts() async {if(speaking){await tts.stop();setState(()=>speaking=false);}else{setState(()=>speaking=true);await tts.speak('${plain(widget.post['title']['rendered'] ?? '')}. ${plain(widget.post['content']['rendered'] ?? '')}');}}
+  @override void dispose(){tts.stop();super.dispose();}
+  @override Widget build(BuildContext context) {final img=imageFor(widget.post);return Scaffold(appBar:AppBar(title:const Text('A MI IDŐNK'),actions:[IconButton(icon:Icon(saved?Icons.bookmark:Icons.bookmark_border),onPressed:_toggleSaved)]),body:ListView(children:[if(img.isNotEmpty)Image.network(img,fit:BoxFit.cover,errorBuilder:(_,__,___)=>const SizedBox.shrink()),Padding(padding:const EdgeInsets.all(18),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(plain(widget.post['title']['rendered'] ?? ''),style:Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight:FontWeight.bold)),const SizedBox(height:10),Text((widget.post['date']??'').toString().replaceAll('T','  ')),const SizedBox(height:12),FilledButton.icon(onPressed:_toggleTts,icon:Icon(speaking?Icons.stop:Icons.volume_up),label:Text(speaking?'Felolvasás leállítása':'Cikk felolvasása')),const SizedBox(height:20),Html(data: articleHtml((widget.post['content']['rendered'] ?? '').toString()),style:{'body':Style(margin:Margins.zero,fontSize:FontSize(18),lineHeight:LineHeight(1.65))}),const SizedBox(height:25),TextButton.icon(onPressed:()=>launchUrl(Uri.parse(widget.post['link'] ?? baseUrl),mode:LaunchMode.externalApplication),icon:const Icon(Icons.open_in_new),label:const Text('Eredeti cikk megnyitása'))]))]));}
+}
+
+class SavedPage extends StatefulWidget {const SavedPage({super.key});@override State<SavedPage> createState()=>_SavedPageState();}
+class _SavedPageState extends State<SavedPage> {
+  Future<List<dynamic>> load() async {final p=await SharedPreferences.getInstance();return (p.getStringList('saved')??[]).map((id)=>p.getString('article_$id')).whereType<String>().map((s)=>jsonDecode(s)).toList();}
+  @override Widget build(BuildContext context)=>FutureBuilder<List<dynamic>>(future:load(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());if(s.data!.isEmpty)return const Center(child:Text('Még nincs mentett cikk.'));return ListView(children:s.data!.map((p)=>NewsTile(post:p)).toList());});
+}
+class NewsSearchDelegate extends SearchDelegate<String> {
+  @override String get searchFieldLabel=>'Keresés a hírek között';
+  @override List<Widget> buildActions(BuildContext context)=>[IconButton(icon:const Icon(Icons.clear),onPressed:()=>query='')];
+  @override Widget buildLeading(BuildContext context)=>IconButton(icon:const Icon(Icons.arrow_back),onPressed:()=>close(context,''));
+  @override Widget buildResults(BuildContext context)=>FutureBuilder<List<dynamic>>(future:NewsApi.posts(search:query),builder:(context,s){if(s.hasError)return Center(child:Text('${s.error}'));if(!s.hasData)return const Center(child:CircularProgressIndicator());return ListView(children:s.data!.map((p)=>NewsTile(post:p)).toList());});
+  @override Widget buildSuggestions(BuildContext context)=>Center(child:Text(query.isEmpty?'Írj be egy keresőkifejezést.':'Nyomd meg a keresés gombot.'));
+}
