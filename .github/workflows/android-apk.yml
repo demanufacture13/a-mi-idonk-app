@@ -32,6 +32,24 @@ jobs:
           flutter create --platforms=android .
           flutter pub get
 
+          
+      - name: Alkalmazás nevének beállítása
+        working-directory: amiidonk_apk_build
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+          import re
+          s = re.sub(
+              r'android:label="[^"]*"',
+              'android:label="A MI IDŐNK"',
+              s,
+              count=1
+          )
+          p.write_text(s)
+          PY
+
       - name: Alkalmazásikon elkészítése
         working-directory: amiidonk_apk_build
         run: dart run flutter_launcher_icons
