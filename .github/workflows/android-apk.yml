@@ -1,4 +1,3 @@
-
 name: A MI IDŐNK - Android APK
 
 on:
@@ -32,21 +31,15 @@ jobs:
           flutter create --platforms=android .
           flutter pub get
 
-          
       - name: Alkalmazás nevének beállítása
         working-directory: amiidonk_apk_build
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
           p = Path("android/app/src/main/AndroidManifest.xml")
           s = p.read_text()
-          import re
-          s = re.sub(
-              r'android:label="[^"]*"',
-              'android:label="A MI IDŐNK"',
-              s,
-              count=1
-          )
+          s = re.sub(r'android:label="[^"]*"', 'android:label="A MI IDŐNK"', s, count=1)
           p.write_text(s)
           PY
 
@@ -66,19 +59,11 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           p = Path("android/app/src/main/AndroidManifest.xml")
           s = p.read_text()
-
           permission = '<uses-permission android:name="android.permission.INTERNET"/>'
-
           if permission not in s:
-              s = s.replace(
-                  "<application",
-                  permission + "\n    <application",
-                  1
-              )
-
+              s = s.replace("<application", permission + "\n    <application", 1)
           p.write_text(s)
           PY
 
@@ -86,40 +71,24 @@ jobs:
         working-directory: amiidonk_apk_build
         run: |
           python3 -m pip install --quiet pillow
-
           python3 - <<'PY'
           from pathlib import Path
           from PIL import Image, ImageOps, ImageFilter
-
           source = Path("d48ef3fd-9f5d-44e5-a624-14270c81535b.png")
-
           if not source.exists():
-              raise SystemExit(
-                  "Nem található az alkalmazásikon: " + str(source)
-              )
-
+              raise SystemExit("Nem található az alkalmazásikon: " + str(source))
           image = Image.open(source).convert("RGBA")
           image = ImageOps.fit(image, (256, 256))
-
-          # A háttértől elkülönülő logómaszk.
           pixels = image.load()
           background = pixels[0, 0][:3]
-
           mask = Image.new("L", image.size, 0)
           output = mask.load()
-
           for y in range(image.height):
               for x in range(image.width):
                   r, g, b, a = pixels[x, y]
-                  distance = max(
-                      abs(r - background[0]),
-                      abs(g - background[1]),
-                      abs(b - background[2])
-                  )
+                  distance = max(abs(r - background[0]), abs(g - background[1]), abs(b - background[2]))
                   output[x, y] = 255 if a > 80 and distance > 65 else 0
-
           mask = mask.filter(ImageFilter.GaussianBlur(0.4))
-
           sizes = {
               "drawable-mdpi": 24,
               "drawable-hdpi": 36,
@@ -127,20 +96,13 @@ jobs:
               "drawable-xxhdpi": 72,
               "drawable-xxxhdpi": 96,
           }
-
           for folder, size in sizes.items():
               destination = Path("android/app/src/main/res") / folder
               destination.mkdir(parents=True, exist_ok=True)
-
-              resized = mask.resize(
-                  (size, size),
-                  Image.Resampling.LANCZOS
-              )
-
+              resized = mask.resize((size, size), Image.Resampling.LANCZOS)
               icon = Image.new("RGBA", (size, size), (255, 255, 255, 0))
               icon.putalpha(resized)
               icon.save(destination / "ic_stat_amiidonk.png")
-
           print("Értesítési ikonok elkészültek.")
           PY
 
@@ -149,10 +111,8 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           p = Path("android/app/src/main/AndroidManifest.xml")
           s = p.read_text()
-
           metadata = '''
               <meta-data
                   android:name="com.google.firebase.messaging.default_notification_icon"
@@ -161,20 +121,12 @@ jobs:
                   android:name="com.google.firebase.messaging.default_notification_color"
                   android:resource="@color/notification_red" />
           '''
-
           if "com.google.firebase.messaging.default_notification_icon" not in s:
-              s = s.replace(
-                  "<application",
-                  "<application",
-                  1
-              )
               position = s.find(">", s.find("<application"))
               if position == -1:
                   raise SystemExit("Az application elem nem található.")
               s = s[:position + 1] + metadata + s[position + 1:]
-
           p.write_text(s)
-
           colors = Path("android/app/src/main/res/values/colors.xml")
           colors.parent.mkdir(parents=True, exist_ok=True)
           colors.write_text(
@@ -190,38 +142,69 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           settings = Path("android/settings.gradle.kts")
           s = settings.read_text()
-
           plugin = 'id("com.google.gms.google-services") version "4.4.4" apply false'
-
           if plugin not in s:
-              s = s.replace(
-                  'plugins {',
-                  'plugins {\n    ' + plugin,
-                  1
-              )
-
+              s = s.replace('plugins {', 'plugins {\n    ' + plugin, 1)
           settings.write_text(s)
-
           app = Path("android/app/build.gradle.kts")
           s = app.read_text()
-
           plugin = 'id("com.google.gms.google-services")'
-
           if plugin not in s:
-              s = s.replace(
-                  'plugins {',
-                  'plugins {\n    ' + plugin,
-                  1
-              )
-
+              s = s.replace('plugins {', 'plugins {\n    ' + plugin, 1)
           app.write_text(s)
+          PY
+
+      - name: Állandó aláírókulcs előkészítése
+        working-directory: amiidonk_apk_build
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            echo "Hiányzik az ANDROID_KEYSTORE_BASE64 vagy ANDROID_KEY_PASSWORD GitHub Secret."
+            exit 1
+          fi
+          mkdir -p android/app
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/amiidonk-release.jks
+          test -s android/app/amiidonk-release.jks
+          keytool -list -keystore android/app/amiidonk-release.jks -storepass "$ANDROID_KEY_PASSWORD" -alias amiidonk > /dev/null
+
+      - name: Android release aláírás beállítása
+        working-directory: amiidonk_apk_build
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('android/app/build.gradle.kts')
+          s = p.read_text()
+          if 'signingConfigs.getByName("debug")' not in s:
+              raise SystemExit('Nem található a Flutter alapértelmezett debug aláírási sora; biztonságos leállás.')
+          s = s.replace(
+              'signingConfigs.getByName("debug")',
+              'signingConfigs.getByName("release")',
+              1
+          )
+          marker = '    buildTypes {'
+          if marker not in s:
+              raise SystemExit('Nem található az Android buildTypes blokk.')
+          signing = '''    signingConfigs {
+              create("release") {
+                  storeFile = file("amiidonk-release.jks")
+                  storePassword = System.getenv("ANDROID_KEY_PASSWORD")
+                  keyAlias = "amiidonk"
+                  keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+              }
+          }
+          '''
+          s = s.replace(marker, signing + marker, 1)
+          p.write_text(s)
           PY
 
       - name: APK elkészítése
         working-directory: amiidonk_apk_build
+        env:
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: flutter build apk --release
 
       - name: APK feltöltése
