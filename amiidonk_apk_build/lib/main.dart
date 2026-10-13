@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -20,19 +21,9 @@ const newsletterUrl = '$baseUrl';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-
-  final settings = await FirebaseMessaging.instance.requestPermission(
-    alert: true,
-    badge: true,
-    sound: true,
-  );
-
-  if (settings.authorizationStatus == AuthorizationStatus.authorized) {
-    await FirebaseMessaging.instance.subscribeToTopic('uj_cikkek');
-  }
-
   runApp(const NewsApp());
 }
+
 String plain(String markup) => html_parser.parse(markup).body?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
 
 // WordPress lazy-loading images often keep the actual URL in data-src,
@@ -85,29 +76,20 @@ String imageFor(dynamic post) {
 
 Future<void> openNotificationArticle(RemoteMessage message) async {
   final postId = message.data['post_id'];
-
-  if (postId == null || postId.isEmpty) return;
+  if (postId == null || !RegExp(r'^\d+$').hasMatch(postId)) return;
 
   try {
     final response = await http.get(
       Uri.parse('$baseUrl/wp-json/wp/v2/posts/$postId'),
-    );
-
+    ).timeout(const Duration(seconds: 18));
     if (response.statusCode != 200) {
       debugPrint('A cikk nem tölthető be: ${response.statusCode}');
       return;
     }
-
     final post = jsonDecode(response.body);
-
     final navigator = notificationNavigatorKey.currentState;
     if (navigator == null) return;
-
-    navigator.push(
-      MaterialPageRoute(
-        builder: (_) => ArticlePage(post: post),
-      ),
-    );
+    navigator.push(MaterialPageRoute(builder: (_) => ArticlePage(post: post)));
   } catch (error) {
     debugPrint('Hiba az értesítés megnyitásakor: $error');
   }
@@ -119,30 +101,144 @@ class NewsApp extends StatefulWidget {
 }
 class _NewsAppState extends State<NewsApp> {
   ThemeMode mode = ThemeMode.system;
-  @override void initState() { super.initState(); _load(); }
+  bool notificationsEnabled = false;
+  bool notificationsBusy = true;
+  bool notificationsAllowed = true;
+  StreamSubscription<RemoteMessage>? notificationTapSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initializeNotifications();
+    });
+  }
+
   Future<void> _load() async {
     final p = await SharedPreferences.getInstance();
-    if (mounted) setState(() => mode = ThemeMode.values[p.getInt('theme') ?? 0]);
+    final savedMode = p.getInt('theme') ?? 0;
+    if (mounted) {
+      setState(() => mode = savedMode >= 0 && savedMode < ThemeMode.values.length
+          ? ThemeMode.values[savedMode] : ThemeMode.system);
+    }
   }
+
+  Future<void> _initializeNotifications() async {
+    notificationTapSubscription = FirebaseMessaging.onMessageOpenedApp.listen(
+      (message) { openNotificationArticle(message); },
+    );
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      // Meglévő felhasználóknál alapértelmezésben bekapcsolva marad.
+      final enabled = prefs.getBool('push_enabled') ?? true;
+      if (enabled) {
+        await _subscribeToNotifications();
+      } else {
+        await FirebaseMessaging.instance.unsubscribeFromTopic('uj_cikkek');
+      }
+      if (mounted) setState(() { notificationsEnabled = enabled; notificationsBusy = false; });
+    } catch (error) {
+      debugPrint('Értesítések indítási hibája: $error');
+      if (mounted) setState(() { notificationsBusy = false; notificationsEnabled = false; });
+    }
+
+    // Ha az alkalmazás értesítésre koppintással indult, a főoldal
+    // felépülése után nyitjuk meg a cikket.
+    try {
+      final initialMessage = await FirebaseMessaging.instance.getInitialMessage();
+      if (initialMessage != null && mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) openNotificationArticle(initialMessage);
+        });
+      }
+    } catch (error) {
+      debugPrint('Indító értesítés hibája: $error');
+    }
+  }
+
+  Future<void> _subscribeToNotifications() async {
+    final settings = await FirebaseMessaging.instance.requestPermission(
+      alert: true, badge: true, sound: true,
+    );
+    final allowed = settings.authorizationStatus == AuthorizationStatus.authorized ||
+        settings.authorizationStatus == AuthorizationStatus.provisional;
+    if (!allowed) {
+      if (mounted) setState(() => notificationsAllowed = false);
+      throw StateError('A rendszerben nincs engedélyezve az értesítés.');
+    }
+    if (mounted) setState(() => notificationsAllowed = true);
+    await FirebaseMessaging.instance.subscribeToTopic('uj_cikkek');
+  }
+
+  Future<void> setNotifications(bool enabled) async {
+    if (notificationsBusy) return;
+    setState(() => notificationsBusy = true);
+    try {
+      if (enabled) {
+        await _subscribeToNotifications();
+      } else {
+        await FirebaseMessaging.instance.unsubscribeFromTopic('uj_cikkek');
+      }
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('push_enabled', enabled);
+      if (mounted) setState(() => notificationsEnabled = enabled);
+    } catch (error) {
+      debugPrint('Értesítési beállítás hibája: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Nem sikerült módosítani az értesítéseket: $error'),
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => notificationsBusy = false);
+    }
+  }
+
   Future<void> setMode(ThemeMode value) async {
     final p = await SharedPreferences.getInstance();
     await p.setInt('theme', value.index);
-    setState(() => mode = value);
+    if (mounted) setState(() => mode = value);
   }
-  @override Widget build(BuildContext context) => MaterialApp(
+
+  @override
+  void dispose() {
+    notificationTapSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => MaterialApp(
     navigatorKey: notificationNavigatorKey,
-    title:'A MI IDŐNK', debugShowCheckedModeBanner:false,
-    themeMode:mode,
-    theme:ThemeData(useMaterial3:true,colorSchemeSeed:brandRed,brightness:Brightness.light,appBarTheme:const AppBarTheme(backgroundColor:brandRed,foregroundColor:Colors.white)),
-    darkTheme:ThemeData(useMaterial3:true,colorSchemeSeed:brandRed,brightness:Brightness.dark),
-    home: HomePage(mode:mode,onMode:setMode),
+    title: 'A MI IDŐNK',
+    debugShowCheckedModeBanner: false,
+    themeMode: mode,
+    theme: ThemeData(useMaterial3: true, colorSchemeSeed: brandRed,
+        brightness: Brightness.light,
+        appBarTheme: const AppBarTheme(backgroundColor: brandRed, foregroundColor: Colors.white)),
+    darkTheme: ThemeData(useMaterial3: true, colorSchemeSeed: brandRed,
+        brightness: Brightness.dark),
+    home: HomePage(
+      mode: mode,
+      onMode: setMode,
+      notificationsEnabled: notificationsEnabled,
+      notificationsBusy: notificationsBusy,
+      notificationsAllowed: notificationsAllowed,
+      onNotificationsChanged: setNotifications,
+    ),
   );
 }
 
 class HomePage extends StatefulWidget {
   final ThemeMode mode;
   final ValueChanged<ThemeMode> onMode;
-  const HomePage({super.key,required this.mode,required this.onMode});
+  final bool notificationsEnabled;
+  final bool notificationsBusy;
+  final bool notificationsAllowed;
+  final ValueChanged<bool> onNotificationsChanged;
+  const HomePage({super.key, required this.mode, required this.onMode,
+    required this.notificationsEnabled, required this.notificationsBusy,
+    required this.notificationsAllowed, required this.onNotificationsChanged});
   @override State<HomePage> createState() => _HomePageState();
 }
 class _HomePageState extends State<HomePage> {
@@ -180,7 +276,17 @@ class _HomePageState extends State<HomePage> {
     RadioListTile<ThemeMode>(title:const Text('Világos'),value:ThemeMode.light,groupValue:widget.mode,onChanged:(v)=>widget.onMode(v!)),
     RadioListTile<ThemeMode>(title:const Text('Sötét'),value:ThemeMode.dark,groupValue:widget.mode,onChanged:(v)=>widget.onMode(v!)),
     const Divider(),ListTile(leading:const Icon(Icons.mail_outline),title:const Text('Hírlevél-feliratkozás'),subtitle:const Text('Feliratkozás a weboldalon'),onTap:()=>launchUrl(Uri.parse(newsletterUrl),mode:LaunchMode.externalApplication)),
-    const ListTile(leading:Icon(Icons.notifications_outlined),title:Text('Értesítések'),subtitle:Text('Élesítéshez Firebase-beállítás szükséges')),
+    SwitchListTile(
+      secondary: const Icon(Icons.notifications_outlined),
+      title: const Text('Új cikkek értesítései'),
+      subtitle: Text(widget.notificationsBusy
+          ? 'Beállítás folyamatban…'
+          : !widget.notificationsAllowed && !widget.notificationsEnabled
+              ? 'Engedélyezd az értesítéseket a készülék beállításaiban.'
+              : widget.notificationsEnabled ? 'Bekapcsolva' : 'Kikapcsolva'),
+      value: widget.notificationsEnabled,
+      onChanged: widget.notificationsBusy ? null : widget.onNotificationsChanged,
+    ),
     const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.0'),
   ]);
 }
