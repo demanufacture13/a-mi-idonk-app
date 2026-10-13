@@ -1,0 +1,32 @@
+
+name: A MI IDONK - Alairo kulcs keszitese
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generate-key:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Alairo kulcs generalasa
+        run: |
+          keytool -genkeypair \
+            -v \
+            -keystore amiidonk-release.jks \
+            -alias amiidonk \
+            -keyalg RSA \
+            -keysize 3072 \
+            -validity 10000 \
+            -storepass "$KEY_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -dname "CN=A MI IDONK, OU=Mobile, O=A MI IDONK, C=HU"
+        env:
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Kulcs mentese
+        uses: actions/upload-artifact@v4
+        with:
+          name: A_MI_IDONK_Android_Alairo_Kulcs
+          path: amiidonk-release.jks
+          retention-days: 1
