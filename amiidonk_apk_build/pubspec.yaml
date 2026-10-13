@@ -8,7 +8,7 @@ dependencies:
   flutter:
     sdk: flutter
   html: ^0.15.5
-  flutter_html: ^3.0.0
+
   http: ^1.2.2
   shared_preferences: ^2.3.2
   flutter_tts: ^4.0.2
