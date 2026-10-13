@@ -1,0 +1,41 @@
+
+name: A MI IDŐNK - Android APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Projekt letöltése
+        uses: actions/checkout@v4
+
+      - name: Java telepítése
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Flutter telepítése
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flutter projekt előkészítése
+        working-directory: amiidonk_apk_build
+        run: |
+          flutter create --platforms=android .
+          flutter pub get
+
+      - name: APK elkészítése
+        working-directory: amiidonk_apk_build
+        run: flutter build apk --release
+
+      - name: APK feltöltése
+        uses: actions/upload-artifact@v4
+        with:
+          name: A_MI_IDONK_Redmi_Pad_2_APK
+          path: amiidonk_apk_build/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
