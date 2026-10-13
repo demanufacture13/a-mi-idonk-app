@@ -2,9 +2,18 @@ name: A MI IDŐNK - Android APK
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Kiadás verziója (például v1.0.0); üresen csak APK készül'
+        required: false
+        type: string
+        default: ''
   push:
     branches:
       - main
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -201,11 +210,28 @@ jobs:
           p.write_text(s)
           PY
 
+      - name: Kiadási verzió ellenőrzése
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' }}
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "A verzió formátuma legyen például v1.0.0"
+            exit 1
+          fi
+
       - name: APK elkészítése
         working-directory: amiidonk_apk_build
         env:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: flutter build apk --release
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            flutter build apk --release --build-name "${RELEASE_TAG#v}" --build-number "$BUILD_NUMBER"
+          else
+            flutter build apk --release --build-number "$BUILD_NUMBER"
+          fi
 
       - name: APK feltöltése
         uses: actions/upload-artifact@v4
@@ -213,3 +239,22 @@ jobs:
           name: A_MI_IDONK_Redmi_Pad_2_APK
           path: amiidonk_apk_build/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+
+      - name: APK közzététele GitHub Releases oldalon
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          APK="amiidonk_apk_build/build/app/outputs/flutter-apk/app-release.apk"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$APK#A_MI_IDONK.apk" --clobber
+            gh release edit "$RELEASE_TAG" --draft=false
+          else
+            gh release create "$RELEASE_TAG" "$APK#A_MI_IDONK.apk" \
+              --target "$GITHUB_SHA" \
+              --title "A MI IDŐNK – ${RELEASE_TAG#v}" \
+              --notes "A MI IDŐNK Android alkalmazás új verziója." \
+              --latest
+          fi
