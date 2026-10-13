@@ -48,6 +48,35 @@ jobs:
         run: |
           python3 -c 'from pathlib import Path; p=Path("android/app/src/main/AndroidManifest.xml"); s=p.read_text(); permission="<uses-permission android:name=\"android.permission.INTERNET\"/>"; s=s if permission in s else s.replace("<application", permission+"\n    <application", 1); p.write_text(s)'
 
+      - name: Firebase Android plugin beállítása
+        working-directory: amiidonk_apk_build
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          settings = Path("android/settings.gradle.kts")
+          s = settings.read_text()
+          plugin = 'id("com.google.gms.google-services") version "4.4.4" apply false'
+          if plugin not in s:
+              s = s.replace(
+                  'plugins {',
+                  'plugins {\n    ' + plugin,
+                  1
+              )
+          settings.write_text(s)
+
+          app = Path("android/app/build.gradle.kts")
+          s = app.read_text()
+          plugin = 'id("com.google.gms.google-services")'
+          if plugin not in s:
+              s = s.replace(
+                  'plugins {',
+                  'plugins {\n    ' + plugin,
+                  1
+              )
+          app.write_text(s)
+          PY
+
       - name: APK elkészítése
         working-directory: amiidonk_apk_build
         run: flutter build apk --release
