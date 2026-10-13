@@ -3,6 +3,9 @@ name: A MI IDŐNK - Android APK
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   build:
@@ -29,22 +32,10 @@ jobs:
           flutter create --platforms=android .
           flutter pub get
 
-         - name: Android internetengedély javítása
+      - name: Internetengedély hozzáadása
         working-directory: amiidonk_apk_build
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("android/app/src/main/AndroidManifest.xml")
-          s = p.read_text()
-          permission = '<uses-permission android:name="android.permission.INTERNET"/>'
-          if permission not in s:
-              s = s.replace(
-                  '<application',
-                  permission + '\n    <application',
-                  1
-              )
-              p.write_text(s)
-          PY       
+          python3 -c 'from pathlib import Path; p=Path("android/app/src/main/AndroidManifest.xml"); s=p.read_text(); permission="<uses-permission android:name=\"android.permission.INTERNET\"/>"; s=s if permission in s else s.replace("<application", permission+"\n    <application", 1); p.write_text(s)'
 
       - name: APK elkészítése
         working-directory: amiidonk_apk_build
