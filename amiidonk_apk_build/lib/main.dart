@@ -9,6 +9,9 @@ import 'package:html/parser.dart' as html_parser;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 
+final GlobalKey<NavigatorState> notificationNavigatorKey =
+    GlobalKey<NavigatorState>();
+
 const baseUrl = 'https://www.amiidonk.hu';
 const brandRed = Color(0xFFD20A12);
 // Állítsd be a hírlevél tényleges feliratkozási URL-jét az élesítés előtt.
