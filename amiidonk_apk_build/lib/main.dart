@@ -17,6 +17,13 @@ const newsletterUrl = '$baseUrl';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
+  
+  await FirebaseMessaging.instance.requestPermission(
+    alert: true,
+    badge: true,
+    sound: true,
+  );
+  
   runApp(const NewsApp());
 }
 String plain(String markup) => html_parser.parse(markup).body?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
