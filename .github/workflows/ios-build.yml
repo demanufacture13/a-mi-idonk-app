@@ -1,0 +1,43 @@
+
+name: A MI IDONK - iPhone Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: GitHub kod letoltese
+        uses: actions/checkout@v4
+
+      - name: Flutter telepitese
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: iOS projekt letrehozasa
+        working-directory: amiidonk_apk_build
+        run: flutter create --platforms=ios --org hu.amiidonk .
+
+      - name: Firebase konfiguracio beallitasa
+        working-directory: amiidonk_apk_build
+        env:
+          FIREBASE_IOS_CONFIG: ${{ secrets.FIREBASE_IOS_CONFIG }}
+        run: |
+          printf '%s' "$FIREBASE_IOS_CONFIG" > ios/Runner/GoogleService-Info.plist
+
+      - name: Flutter csomagok letoltese
+        working-directory: amiidonk_apk_build
+        run: flutter pub get
+
+      - name: iOS alkalmazas forditasa
+        working-directory: amiidonk_apk_build
+        run: flutter build ios --release --no-codesign
+
+      - name: Forditott alkalmazas mentese
+        uses: actions/upload-artifact@v4
+        with:
+          name: A_MI_IDONK_iPhone_unsigned
+          path: amiidonk_apk_build/build/ios/iphoneos/Runner.app
