@@ -6,15 +6,19 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:html/parser.dart' as html_parser;
-
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
 const baseUrl = 'https://www.amiidonk.hu';
 const brandRed = Color(0xFFD20A12);
 // Állítsd be a hírlevél tényleges feliratkozási URL-jét az élesítés előtt.
 const newsletterUrl = '$baseUrl';
 
-void main() => runApp(const NewsApp());
-
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  runApp(const NewsApp());
+}
 String plain(String markup) => html_parser.parse(markup).body?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
 
 // WordPress lazy-loading images often keep the actual URL in data-src,
