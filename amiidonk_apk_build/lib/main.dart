@@ -17,13 +17,17 @@ const newsletterUrl = '$baseUrl';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  
-  await FirebaseMessaging.instance.requestPermission(
+
+  final settings = await FirebaseMessaging.instance.requestPermission(
     alert: true,
     badge: true,
     sound: true,
   );
-  
+
+  if (settings.authorizationStatus == AuthorizationStatus.authorized) {
+    await FirebaseMessaging.instance.subscribeToTopic('uj_cikkek');
+  }
+
   runApp(const NewsApp());
 }
 String plain(String markup) => html_parser.parse(markup).body?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
