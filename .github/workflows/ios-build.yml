@@ -26,6 +26,7 @@ jobs:
         env:
           FIREBASE_IOS_CONFIG: ${{ secrets.FIREBASE_IOS_CONFIG }}
         run: |
+          test -n "$FIREBASE_IOS_CONFIG"
           printf '%s' "$FIREBASE_IOS_CONFIG" > ios/Runner/GoogleService-Info.plist
 
       - name: Flutter csomagok letoltese
@@ -36,8 +37,17 @@ jobs:
         working-directory: amiidonk_apk_build
         run: flutter build ios --release --no-codesign
 
-      - name: Forditott alkalmazas mentese
+      - name: Alairas nelkuli IPA keszitese
+        working-directory: amiidonk_apk_build
+        run: |
+          mkdir -p build/ios/unsigned/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ios/unsigned/Payload/
+          cd build/ios/unsigned
+          zip -qry A_MI_IDONK_iPhone_unsigned.ipa Payload
+
+      - name: IPA feltoltese
         uses: actions/upload-artifact@v4
         with:
-          name: A_MI_IDONK_iPhone_unsigned
-          path: amiidonk_apk_build/build/ios/iphoneos/Runner.app
+          name: A_MI_IDONK_iPhone_IPA
+          path: amiidonk_apk_build/build/ios/unsigned/A_MI_IDONK_iPhone_unsigned.ipa
+          if-no-files-found: error
