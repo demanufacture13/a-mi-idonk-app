@@ -17,3 +17,10 @@ dependencies:
   webview_flutter: ^4.9.0
 flutter:
   uses-material-design: true
+dev_dependencies:
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "d48ef3fd-9f5d-44e5-a624-14270c81535b.png"
