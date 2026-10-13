@@ -29,6 +29,23 @@ jobs:
           flutter create --platforms=android .
           flutter pub get
 
+         - name: Android internetengedély javítása
+        working-directory: amiidonk_apk_build
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+          permission = '<uses-permission android:name="android.permission.INTERNET"/>'
+          if permission not in s:
+              s = s.replace(
+                  '<application',
+                  permission + '\n    <application',
+                  1
+              )
+              p.write_text(s)
+          PY       
+
       - name: APK elkészítése
         working-directory: amiidonk_apk_build
         run: flutter build apk --release
