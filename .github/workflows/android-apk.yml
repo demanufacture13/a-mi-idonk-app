@@ -35,6 +35,13 @@ jobs:
       - name: Alkalmazásikon elkészítése
         working-directory: amiidonk_apk_build
         run: dart run flutter_launcher_icons
+
+      - name: Firebase konfiguráció hozzáadása
+        working-directory: amiidonk_apk_build
+        env:
+          FIREBASE_CONFIG: ${{ secrets.FIREBASE_CONFIG }}
+        run: |
+          printf '%s' "$FIREBASE_CONFIG" > android/app/google-services.json
         
       - name: Internetengedély hozzáadása
         working-directory: amiidonk_apk_build
