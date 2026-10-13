@@ -83,6 +83,36 @@ String imageFor(dynamic post) {
   catch (_) { return ''; }
 }
 
+Future<void> openNotificationArticle(RemoteMessage message) async {
+  final postId = message.data['post_id'];
+
+  if (postId == null || postId.isEmpty) return;
+
+  try {
+    final response = await http.get(
+      Uri.parse('$baseUrl/wp-json/wp/v2/posts/$postId'),
+    );
+
+    if (response.statusCode != 200) {
+      debugPrint('A cikk nem tölthető be: ${response.statusCode}');
+      return;
+    }
+
+    final post = jsonDecode(response.body);
+
+    final navigator = notificationNavigatorKey.currentState;
+    if (navigator == null) return;
+
+    navigator.push(
+      MaterialPageRoute(
+        builder: (_) => ArticlePage(post: post),
+      ),
+    );
+  } catch (error) {
+    debugPrint('Hiba az értesítés megnyitásakor: $error');
+  }
+}
+
 class NewsApp extends StatefulWidget {
   const NewsApp({super.key});
   @override State<NewsApp> createState() => _NewsAppState();
