@@ -18,7 +18,7 @@ void main() => runApp(const NewsApp());
 String plain(String markup) => html_parser.parse(markup).body?.text.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
 
 // WordPress lazy-loading images often keep the actual URL in data-src,
-// data-lazy-src or srcset. Normalize them before passing HTML to flutter_html.
+// data-lazy-src or srcset. Normalize them before displaying HTML.
 String articleHtml(String markup) {
   final fragment = html_parser.parseFragment(markup);
   for (final img in fragment.querySelectorAll('img')) {
@@ -162,13 +162,53 @@ class _ArticlePageState extends State<ArticlePage> {
   Future<void> _toggleSaved() async {final p=await SharedPreferences.getInstance();final ids=p.getStringList('saved')??[];if(ids.contains(id)){ids.remove(id);}else{ids.add(id);await p.setString('article_$id',jsonEncode(widget.post));}await p.setStringList('saved',ids);setState(()=>saved=ids.contains(id));}
   Future<void> _toggleTts() async {if(speaking){await tts.stop();setState(()=>speaking=false);}else{setState(()=>speaking=true);await tts.speak('${plain(widget.post['title']['rendered'] ?? '')}. ${plain(widget.post['content']['rendered'] ?? '')}');}}
   @override void dispose(){tts.stop();super.dispose();}
-  @override Widget build(BuildContext context) {final img=imageFor(widget.post);return Scaffold(appBar:AppBar(title:const Text('A MI IDŐNK'),actions:[IconButton(icon:Icon(saved?Icons.bookmark:Icons.bookmark_border),onPressed:_toggleSaved)]),body:ListView(children:[if(img.isNotEmpty)Image.network(img,fit:BoxFit.cover,errorBuilder:(_,__,___)=>const SizedBox.shrink()),Padding(padding:const EdgeInsets.all(18),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(plain(widget.post['title']['rendered'] ?? ''),style:Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight:FontWeight.bold)),const SizedBox(height:10),Text((widget.post['date']??'').toString().replaceAll('T','  ')),const SizedBox(height:12),FilledButton.icon(onPressed:_toggleTts,icon:Icon(speaking?Icons.stop:Icons.volume_up),label:Text(speaking?'Felolvasás leállítása':'Cikk felolvasása')),const SizedBox(height:20),Text(
-  plain(widget.post['content']['rendered'] ?? ''),
-  style: const TextStyle(
-    fontSize: 18,
-    height: 1.65,
-  ),
-),const SizedBox(height:25),TextButton.icon(onPressed:()=>launchUrl(Uri.parse(widget.post['link'] ?? baseUrl),mode:LaunchMode.externalApplication),icon:const Icon(Icons.open_in_new),label:const Text('Eredeti cikk megnyitása'))]))]));}
+  @override
+  Widget build(BuildContext context) {
+    final content = articleHtml((widget.post['content']?['rendered'] ?? '').toString());
+    final title = plain((widget.post['title']?['rendered'] ?? '').toString());
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final background = isDark ? '#121212' : '#ffffff';
+    final foreground = isDark ? '#eeeeee' : '#222222';
+    final page = '''<!doctype html><html lang="hu"><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
+      body {background: BG; color: FG; font-family: sans-serif; font-size: 18px; line-height: 1.65; margin: 18px; overflow-wrap: break-word;}
+      img, video, iframe {max-width: 100%; height: auto;} figure {max-width: 100%; margin: 16px 0;}
+      p {margin: 0 0 1.1em;} h1,h2,h3,h4 {line-height: 1.3; margin-top: 1.4em;}
+      a {color: #d20a12;} blockquote {border-left: 4px solid #d20a12; padding-left: 12px; margin-left: 0;}
+      figcaption {font-size: 0.85em; opacity: 0.75;} table {max-width: 100%; display: block; overflow-x: auto;}
+    </style></head><body><h1>TITLE</h1>CONTENT</body></html>'''
+        .replaceAll('BG', background)
+        .replaceAll('FG', foreground)
+        .replaceAll('TITLE', const HtmlEscape().convert(title))
+        .replaceAll('CONTENT', content);
+    final controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.disabled)
+      ..setBackgroundColor(Theme.of(context).scaffoldBackgroundColor)
+      ..loadHtmlString(page, baseUrl: '$baseUrl/');
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('A MI IDŐNK'),
+        actions: [IconButton(icon: Icon(saved ? Icons.bookmark : Icons.bookmark_border), onPressed: _toggleSaved)],
+      ),
+      body: Column(children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: Row(children: [
+            Expanded(child: FilledButton.icon(
+              onPressed: _toggleTts,
+              icon: Icon(speaking ? Icons.stop : Icons.volume_up),
+              label: Text(speaking ? 'Felolvasás leállítása' : 'Cikk felolvasása'),
+            )),
+            IconButton(
+              tooltip: 'Eredeti cikk megnyitása',
+              icon: const Icon(Icons.open_in_new),
+              onPressed: () => launchUrl(Uri.parse((widget.post['link'] ?? baseUrl).toString()), mode: LaunchMode.externalApplication),
+            ),
+          ]),
+        ),
+        Expanded(child: WebViewWidget(controller: controller)),
+      ]),
+    );
+  }
 }
 
 class SavedPage extends StatefulWidget {const SavedPage({super.key});@override State<SavedPage> createState()=>_SavedPageState();}
