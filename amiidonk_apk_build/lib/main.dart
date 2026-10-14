@@ -9,6 +9,7 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'brand_star.dart';
 
 final GlobalKey<NavigatorState> notificationNavigatorKey =
     GlobalKey<NavigatorState>();
@@ -70,10 +71,32 @@ class NewsApi {
 }
 
 String imageFor(dynamic post) {
-  try { return post['_embedded']['wp:featuredmedia'][0]['source_url'] as String? ?? ''; }
-  catch (_) { return ''; }
+  try {
+    final media = post['_embedded']?['wp:featuredmedia'];
+    if (media is List && media.isNotEmpty) {
+      final url = (media.first['source_url'] ?? '').toString();
+      if (url.isNotEmpty) return url;
+    }
+  } catch (_) {}
+  try {
+    final markup = (post['content']?['rendered'] ?? '').toString();
+    final fragment = html_parser.parseFragment(markup);
+    for (final img in fragment.querySelectorAll('img')) {
+      for (final attr in ['data-src', 'data-lazy-src', 'data-original', 'data-orig-file', 'src']) {
+        final value = (img.attributes[attr] ?? '').trim();
+        if (value.isNotEmpty && !value.startsWith('data:') && !value.startsWith('blob:')) {
+          return Uri.parse(baseUrl).resolve(value).toString();
+        }
+      }
+      final srcset = img.attributes['data-srcset'] ?? img.attributes['srcset'] ?? '';
+      if (srcset.isNotEmpty) {
+        final first = srcset.split(',').first.trim().split(RegExp(r'\s+')).first;
+        if (first.isNotEmpty) return Uri.parse(baseUrl).resolve(first).toString();
+      }
+    }
+  } catch (_) {}
+  return '';
 }
-
 Future<void> openNotificationArticle(RemoteMessage message) async {
   final postId = message.data['post_id'];
   if (postId == null || !RegExp(r'^\d+$').hasMatch(postId)) return;
@@ -250,7 +273,7 @@ class _HomePageState extends State<HomePage> {
   @override void initState() { super.initState(); reload(); categories=NewsApi.categories(); }
   void reload() => posts=NewsApi.posts(category:category,search:search);
   @override Widget build(BuildContext context) => Scaffold(
-    appBar:AppBar(title:const Text('☆ A MI IDŐNK',style:TextStyle(fontWeight:FontWeight.w900)),actions:[IconButton(icon:const Icon(Icons.search),onPressed:()=>showSearch(context:context,delegate:NewsSearchDelegate()))]),
+    appBar:AppBar(title:const Row(mainAxisSize:MainAxisSize.min,children:[BrandStar(size:32),SizedBox(width:8),Flexible(child:Text('A MI IDŐNK',style:TextStyle(fontWeight:FontWeight.w900),overflow:TextOverflow.ellipsis))]),actions:[IconButton(icon:const Icon(Icons.search),onPressed:()=>showSearch(context:context,delegate:NewsSearchDelegate()))]),
     body: tab == 0 ? _news() : tab == 1 ? _categories() : tab == 2 ? const SavedPage() : _settings(),
     bottomNavigationBar:NavigationBar(selectedIndex:tab,onDestinationSelected:(v)=>setState(()=>tab=v),destinations:const [
       NavigationDestination(icon:Icon(Icons.home_outlined),selectedIcon:Icon(Icons.home),label:'Hírek'),
@@ -296,10 +319,34 @@ class NewsTile extends StatelessWidget {
   const NewsTile({super.key,required this.post});
   @override Widget build(BuildContext context) {
     final image=imageFor(post);
-    return Card(margin:const EdgeInsets.symmetric(horizontal:10,vertical:6),clipBehavior:Clip.antiAlias,child:InkWell(onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>ArticlePage(post:post))),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      if(image.isNotEmpty) Image.network(image,height:190,width:double.infinity,fit:BoxFit.cover,errorBuilder:(_,__,___)=>const SizedBox.shrink()),
-      Padding(padding:const EdgeInsets.all(14),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(plain(post['title']['rendered'] ?? ''),style:Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight:FontWeight.bold)),const SizedBox(height:8),Text(plain(post['excerpt']['rendered'] ?? ''),maxLines:3,overflow:TextOverflow.ellipsis),const SizedBox(height:8),Text((post['date'] ?? '').toString().replaceAll('T','  '),style:Theme.of(context).textTheme.bodySmall)]))
-    ])));
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ArticlePage(post: post))),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            if (image.isNotEmpty) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.network(image, width: 100, height: 100, fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => const SizedBox(width: 100, height: 100, child: Icon(Icons.article_outlined))),
+              ),
+              const SizedBox(width: 12),
+            ],
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(plain(post['title']['rendered'] ?? ''),
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 6),
+              Text(plain(post['excerpt']['rendered'] ?? ''), maxLines: 3, overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 6),
+              Text((post['date'] ?? '').toString().replaceAll('T', '  '), style: Theme.of(context).textTheme.bodySmall),
+            ])),
+          ]),
+        ),
+      ),
+    );
   }
 }
 
@@ -326,7 +373,7 @@ class _ArticlePageState extends State<ArticlePage> {
     final foreground = isDark ? '#eeeeee' : '#222222';
     final page = '''<!doctype html><html lang="hu"><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
       body {background: BG; color: FG; font-family: sans-serif; font-size: 18px; line-height: 1.65; margin: 18px; overflow-wrap: break-word;}
-      img, video, iframe {max-width: 100%; height: auto;} figure {max-width: 100%; margin: 16px 0;}
+      img, video, iframe {max-width: 100%; height: auto;} img {display: block; margin-left: auto !important; margin-right: auto !important;} figure, .wp-block-image {max-width: 100%; margin: 16px auto !important; text-align: center !important;} figure img, .wp-block-image img {margin-left: auto !important; margin-right: auto !important;}
       p {margin: 0 0 1.1em;} h1,h2,h3,h4 {line-height: 1.3; margin-top: 1.4em;}
       a {color: #d20a12;} blockquote {border-left: 4px solid #d20a12; padding-left: 12px; margin-left: 0;}
       figcaption {font-size: 0.85em; opacity: 0.75;} table {max-width: 100%; display: block; overflow-x: auto;}
