@@ -9,7 +9,7 @@ import firebase_admin
 from firebase_admin import credentials, messaging
 
 SITE = "https://www.amiidonk.hu"
-API = SITE + "/wp-json/wp/v2/posts?per_page=20&_fields=id,date_gmt,link,title,status"
+API = SITE + "/wp-json/wp/v2/posts?per_page=20&_fields=id,date_gmt,link,title,status,categories"
 STATE_FILE = Path("scripts/last_post.json")
 TOPIC = "uj_cikkek"
 
@@ -52,6 +52,10 @@ def main():
         title = post["title"]["rendered"]
         link = post["link"]
 
+        category_ids = [int(value) for value in post.get("categories", [])]
+        # FCM conditions support up to five topic terms. A post in more than
+        # five categories is delivered in batches (rare, could duplicate).
+        category_topics = [f"'kategoria_{value}' in topics" for value in category_ids]
         message = messaging.Message(
             notification=messaging.Notification(
                 title="A MI IDŐNK – Új cikk",
@@ -64,8 +68,20 @@ def main():
             topic=TOPIC,
         )
 
+        # Legacy channel for existing v1.0.2 clients.
         message_id = messaging.send(message)
-        print(f"Elküldve: {post['id']} – {message_id}")
+        print(f"Régi csatorna: {post['id']} – {message_id}")
+        for start in range(0, len(category_topics), 5):
+            condition = " || ".join(category_topics[start:start + 5])
+            category_message = messaging.Message(
+                notification=messaging.Notification(
+                    title="A MI IDŐNK – Új cikk", body=title,
+                ),
+                data={"article_url": link, "post_id": str(post["id"])},
+                condition=condition,
+            )
+            category_id = messaging.send(category_message)
+            print(f"Kategóriák: {post['id']} – {category_id}")
         save_state(post["id"])
 
     if not new_posts:
