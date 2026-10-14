@@ -10,6 +10,7 @@ import 'package:html/parser.dart' as html_parser;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:share_plus/share_plus.dart';
 import 'brand_star.dart';
 
 final GlobalKey<NavigatorState> notificationNavigatorKey =
@@ -150,11 +151,15 @@ class _NewsAppState extends State<NewsApp> {
   bool notificationsBusy = true;
   bool notificationsAllowed = true;
   StreamSubscription<RemoteMessage>? notificationTapSubscription;
+  List<dynamic> notificationCategories = [];
+  Set<int> mutedCategoryIds = {};
+  bool categoriesLoaded = false;
 
   @override
   void initState() {
     super.initState();
     _load();
+    _loadNotificationCategories();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializeNotifications();
       _checkForUpdates();
@@ -228,6 +233,59 @@ class _NewsAppState extends State<NewsApp> {
     }
   }
 
+  String _categoryTopic(int id) => 'kategoria_$id';
+
+  Future<void> _loadNotificationCategories() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final muted = (prefs.getStringList('muted_categories') ?? [])
+          .map(int.tryParse).whereType<int>().toSet();
+      final items = await NewsApi.categories();
+      if (!mounted) return;
+      setState(() { notificationCategories = items; mutedCategoryIds = muted; categoriesLoaded = true; });
+      await _syncCategoryTopics();
+    } catch (error) {
+      debugPrint('Értesítési kategóriák: $error');
+    }
+  }
+
+  Future<void> _syncCategoryTopics() async {
+    if (!notificationsEnabled) return;
+    for (final category in notificationCategories) {
+      final id = category['id'] as int;
+      if (mutedCategoryIds.contains(id)) {
+        await FirebaseMessaging.instance.unsubscribeFromTopic(_categoryTopic(id));
+      } else {
+        await FirebaseMessaging.instance.subscribeToTopic(_categoryTopic(id));
+      }
+    }
+    // A régi közös témát leváltjuk, különben dupla értesítések érkeznének.
+    await FirebaseMessaging.instance.unsubscribeFromTopic('uj_cikkek');
+  }
+
+  Future<void> setCategoryNotifications(int id, bool enabled) async {
+    final previous = Set<int>.from(mutedCategoryIds);
+    setState(() {
+      if (enabled) { mutedCategoryIds.remove(id); } else { mutedCategoryIds.add(id); }
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('muted_categories', mutedCategoryIds.map((e) => '$e').toList());
+      if (notificationsEnabled) {
+        if (enabled) {
+          await FirebaseMessaging.instance.subscribeToTopic(_categoryTopic(id));
+        } else {
+          await FirebaseMessaging.instance.unsubscribeFromTopic(_categoryTopic(id));
+        }
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => mutedCategoryIds = previous);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Értesítési hiba: $error')));
+      }
+    }
+  }
+
   Future<void> _initializeNotifications() async {
     notificationTapSubscription = FirebaseMessaging.onMessageOpenedApp.listen(
       (message) { openNotificationArticle(message); },
@@ -242,6 +300,7 @@ class _NewsAppState extends State<NewsApp> {
         await FirebaseMessaging.instance.unsubscribeFromTopic('uj_cikkek');
       }
       if (mounted) setState(() { notificationsEnabled = enabled; notificationsBusy = false; });
+      if (enabled && categoriesLoaded) await _syncCategoryTopics();
     } catch (error) {
       debugPrint('Értesítések indítási hibája: $error');
       if (mounted) setState(() { notificationsBusy = false; notificationsEnabled = false; });
@@ -272,7 +331,17 @@ class _NewsAppState extends State<NewsApp> {
       throw StateError('A rendszerben nincs engedélyezve az értesítés.');
     }
     if (mounted) setState(() => notificationsAllowed = true);
-    await FirebaseMessaging.instance.subscribeToTopic('uj_cikkek');
+    if (categoriesLoaded) {
+      for (final c in notificationCategories) {
+        final id = c['id'] as int;
+        if (!mutedCategoryIds.contains(id)) {
+          await FirebaseMessaging.instance.subscribeToTopic(_categoryTopic(id));
+        }
+      }
+      await FirebaseMessaging.instance.unsubscribeFromTopic('uj_cikkek');
+    } else {
+      await FirebaseMessaging.instance.subscribeToTopic('uj_cikkek');
+    }
   }
 
   Future<void> setNotifications(bool enabled) async {
@@ -283,6 +352,9 @@ class _NewsAppState extends State<NewsApp> {
         await _subscribeToNotifications();
       } else {
         await FirebaseMessaging.instance.unsubscribeFromTopic('uj_cikkek');
+        for (final c in notificationCategories) {
+          await FirebaseMessaging.instance.unsubscribeFromTopic(_categoryTopic(c['id'] as int));
+        }
       }
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('push_enabled', enabled);
@@ -329,6 +401,10 @@ class _NewsAppState extends State<NewsApp> {
       notificationsBusy: notificationsBusy,
       notificationsAllowed: notificationsAllowed,
       onNotificationsChanged: setNotifications,
+      notificationCategories: notificationCategories,
+      mutedCategoryIds: mutedCategoryIds,
+      categoriesLoaded: categoriesLoaded,
+      onCategoryNotificationsChanged: setCategoryNotifications,
     ),
   );
 }
@@ -340,9 +416,15 @@ class HomePage extends StatefulWidget {
   final bool notificationsBusy;
   final bool notificationsAllowed;
   final ValueChanged<bool> onNotificationsChanged;
+  final List<dynamic> notificationCategories;
+  final Set<int> mutedCategoryIds;
+  final bool categoriesLoaded;
+  final void Function(int, bool) onCategoryNotificationsChanged;
   const HomePage({super.key, required this.mode, required this.onMode,
     required this.notificationsEnabled, required this.notificationsBusy,
-    required this.notificationsAllowed, required this.onNotificationsChanged});
+    required this.notificationsAllowed, required this.onNotificationsChanged,
+    required this.notificationCategories, required this.mutedCategoryIds,
+    required this.categoriesLoaded, required this.onCategoryNotificationsChanged});
   @override State<HomePage> createState() => _HomePageState();
 }
 class _HomePageState extends State<HomePage> {
@@ -367,7 +449,10 @@ class _HomePageState extends State<HomePage> {
     if (!snapshot.hasData) { if(snapshot.hasError) return ListView(children:[const SizedBox(height:80),const Icon(Icons.wifi_off,size:44),Center(child:Padding(padding:const EdgeInsets.all(16),child:Text('${snapshot.error}',textAlign:TextAlign.center))),TextButton(onPressed:()=>setState(reload),child:const Text('Újrapróbálás'))]); return const Center(child:CircularProgressIndicator()); }
     final items=snapshot.data!;
     if(items.isEmpty) return ListView(children:const [SizedBox(height:90),Center(child:Text('Nincs találat.'))]);
-    return ListView.builder(itemCount:items.length,itemBuilder:(context,i)=>NewsTile(post:items[i]));
+    return ListView.builder(itemCount:items.length,itemBuilder:(context,i)=>
+      i == 0 && category == null && search.isEmpty
+        ? FeaturedNewsTile(post: items[i], posts: items, index: i)
+        : NewsTile(post:items[i], posts:items, index:i));
   }));
   Widget _categories() => FutureBuilder<List<dynamic>>(future:categories,builder:(context,s){
     if(s.hasError) return Center(child:Text('Nem sikerült betölteni a kategóriákat: ${s.error}'));
@@ -379,6 +464,9 @@ class _HomePageState extends State<HomePage> {
     RadioListTile<ThemeMode>(title:const Text('Rendszer szerint'),value:ThemeMode.system,groupValue:widget.mode,onChanged:(v)=>widget.onMode(v!)),
     RadioListTile<ThemeMode>(title:const Text('Világos'),value:ThemeMode.light,groupValue:widget.mode,onChanged:(v)=>widget.onMode(v!)),
     RadioListTile<ThemeMode>(title:const Text('Sötét'),value:ThemeMode.dark,groupValue:widget.mode,onChanged:(v)=>widget.onMode(v!)),
+    const Divider(),
+    const ListTile(title: Text('Cikkek betűmérete', style: TextStyle(fontWeight: FontWeight.bold))),
+    const ArticleFontSizeSetting(),
     const Divider(),ListTile(leading:const Icon(Icons.mail_outline),title:const Text('Hírlevél-feliratkozás'),subtitle:const Text('Feliratkozás a weboldalon'),onTap:()=>launchUrl(Uri.parse(newsletterUrl),mode:LaunchMode.externalApplication)),
     SwitchListTile(
       secondary: const Icon(Icons.notifications_outlined),
@@ -391,20 +479,116 @@ class _HomePageState extends State<HomePage> {
       value: widget.notificationsEnabled,
       onChanged: widget.notificationsBusy ? null : widget.onNotificationsChanged,
     ),
-    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.2'),
+    const ListTile(title: Text('Értesítések témakörönként', style: TextStyle(fontWeight: FontWeight.bold))),
+    if (!widget.categoriesLoaded) const ListTile(title: Text('Kategóriák betöltése…'))
+    else ...widget.notificationCategories.map((c) {
+      final id = c['id'] as int;
+      return SwitchListTile(
+        title: Text(plain((c['name'] ?? '').toString())),
+        value: !widget.mutedCategoryIds.contains(id),
+        onChanged: widget.notificationsEnabled && !widget.notificationsBusy
+          ? (v) => widget.onCategoryNotificationsChanged(id, v) : null,
+      );
+    }),
+    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.3'),
   ]);
+}
+
+class ArticleFontSizeSetting extends StatefulWidget {
+  const ArticleFontSizeSetting({super.key});
+  @override State<ArticleFontSizeSetting> createState() => _ArticleFontSizeSettingState();
+}
+class _ArticleFontSizeSettingState extends State<ArticleFontSizeSetting> {
+  int size = 18;
+  @override void initState() { super.initState(); _load(); }
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) setState(() => size = prefs.getInt('article_font_size') ?? 18);
+  }
+  @override Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16),
+    child: SegmentedButton<int>(
+      segments: const [
+        ButtonSegment(value: 18, label: Text('Normál')),
+        ButtonSegment(value: 22, label: Text('Nagy')),
+        ButtonSegment(value: 26, label: Text('Extra nagy')),
+      ],
+      selected: {size},
+      onSelectionChanged: (values) async {
+        final next = values.first;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setInt('article_font_size', next);
+        if (mounted) setState(() => size = next);
+      },
+    ),
+  );
+}
+
+class UnreadMarker extends StatefulWidget {
+  final String postId;
+  const UnreadMarker({super.key, required this.postId});
+  @override State<UnreadMarker> createState() => _UnreadMarkerState();
+}
+class _UnreadMarkerState extends State<UnreadMarker> {
+  bool unread = false;
+  @override void initState() { super.initState(); _check(); }
+  Future<void> _check() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) setState(() => unread = !(prefs.getStringList('read_articles') ?? []).contains(widget.postId));
+  }
+  @override Widget build(BuildContext context) => unread
+    ? const Padding(padding: EdgeInsets.only(bottom: 5), child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.fiber_manual_record, size: 11, color: brandRed),
+        SizedBox(width: 4), Text('Még nem olvastad', style: TextStyle(fontSize: 12, color: brandRed)),
+      ])) : const SizedBox.shrink();
+}
+
+class FeaturedNewsTile extends StatelessWidget {
+  final dynamic post;
+  final List<dynamic> posts;
+  final int index;
+  const FeaturedNewsTile({super.key, required this.post, required this.posts, required this.index});
+  @override Widget build(BuildContext context) {
+    final image = imageFor(post);
+    return Card(
+      margin: const EdgeInsets.fromLTRB(10, 12, 10, 8),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => Navigator.push(context, MaterialPageRoute(
+          builder: (_) => ArticlePage(post: post, posts: posts, index: index))),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          if (image.isNotEmpty) Image.network(image, width: double.infinity, height: 220,
+            fit: BoxFit.cover, errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+          Padding(padding: const EdgeInsets.all(16), child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('VEZETŐ HÍR', style: TextStyle(color: brandRed, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 6),
+              UnreadMarker(postId: '${post['id']}'),
+              Text(plain((post['title']?['rendered'] ?? '').toString()),
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Text(plain((post['excerpt']?['rendered'] ?? '').toString()), maxLines: 3,
+                overflow: TextOverflow.ellipsis),
+            ],
+          )),
+        ]),
+      ),
+    );
+  }
 }
 
 class NewsTile extends StatelessWidget {
   final dynamic post;
-  const NewsTile({super.key,required this.post});
+  final List<dynamic>? posts;
+  final int? index;
+  const NewsTile({super.key,required this.post,this.posts,this.index});
   @override Widget build(BuildContext context) {
     final image=imageFor(post);
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ArticlePage(post: post))),
+        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ArticlePage(post: post, posts: posts, index: index))),
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -417,6 +601,7 @@ class NewsTile extends StatelessWidget {
               const SizedBox(width: 12),
             ],
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              UnreadMarker(postId: '${post['id']}'),
               Text(plain(post['title']['rendered'] ?? ''),
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
               const SizedBox(height: 6),
@@ -433,15 +618,41 @@ class NewsTile extends StatelessWidget {
 
 class ArticlePage extends StatefulWidget {
   final dynamic post;
-  const ArticlePage({super.key,required this.post});
+  final List<dynamic>? posts;
+  final int? index;
+  const ArticlePage({super.key,required this.post,this.posts,this.index});
   @override State<ArticlePage> createState()=>_ArticlePageState();
 }
 class _ArticlePageState extends State<ArticlePage> {
   final tts=FlutterTts();
   bool speaking=false, saved=false;
+  int fontSize = 18;
+  double swipeStartX = 0;
   String get id => '${widget.post['id']}';
   @override void initState(){super.initState();_load();tts.setLanguage('hu-HU');tts.setSpeechRate(0.48);tts.setCompletionHandler(() { if (mounted) setState(() => speaking = false); });}
-  Future<void> _load() async {final p=await SharedPreferences.getInstance();if(mounted)setState(()=>saved=(p.getStringList('saved')??[]).contains(id));}
+  Future<void> _load() async {
+    final p = await SharedPreferences.getInstance();
+    final seen = p.getStringList('read_articles') ?? [];
+    if (!seen.contains(id)) {
+      seen.add(id);
+      if (seen.length > 1500) seen.removeRange(0, seen.length - 1500);
+      await p.setStringList('read_articles', seen);
+    }
+    if (mounted) setState(() {
+      saved = (p.getStringList('saved') ?? []).contains(id);
+      fontSize = p.getInt('article_font_size') ?? 18;
+    });
+  }
+  void _navigateArticle(int direction) {
+    final list = widget.posts;
+    final index = widget.index;
+    if (list == null || index == null) return;
+    final next = index + direction;
+    if (next < 0 || next >= list.length) return;
+    Navigator.of(context).pushReplacement(MaterialPageRoute(
+      builder: (_) => ArticlePage(post: list[next], posts: list, index: next)));
+  }
+
   Future<void> _toggleSaved() async {final p=await SharedPreferences.getInstance();final ids=p.getStringList('saved')??[];if(ids.contains(id)){ids.remove(id);}else{ids.add(id);await p.setString('article_$id',jsonEncode(widget.post));}await p.setStringList('saved',ids);setState(()=>saved=ids.contains(id));}
   Future<void> _toggleTts() async {if(speaking){await tts.stop();setState(()=>speaking=false);}else{setState(()=>speaking=true);await tts.speak('${plain(widget.post['title']['rendered'] ?? '')}. ${plain(widget.post['content']['rendered'] ?? '')}');}}
   @override void dispose(){tts.stop();super.dispose();}
@@ -453,7 +664,7 @@ class _ArticlePageState extends State<ArticlePage> {
     final background = isDark ? '#121212' : '#ffffff';
     final foreground = isDark ? '#eeeeee' : '#222222';
     final page = '''<!doctype html><html lang="hu"><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
-      body {background: BG; color: FG; font-family: sans-serif; font-size: 18px; line-height: 1.65; margin: 18px; overflow-wrap: break-word;}
+      body {background: BG; color: FG; font-family: sans-serif; font-size: ${fontSize}px; line-height: 1.65; margin: 18px; overflow-wrap: break-word;}
       img, video, iframe {max-width: 100%; height: auto;} img {display: block; margin-left: auto !important; margin-right: auto !important;} figure, .wp-block-image {max-width: 100%; margin: 16px auto !important; text-align: center !important;} figure img, .wp-block-image img {margin-left: auto !important; margin-right: auto !important;}
       p {margin: 0 0 1.1em;} h1,h2,h3,h4 {line-height: 1.3; margin-top: 1.4em;}
       a {color: #d20a12;} blockquote {border-left: 4px solid #d20a12; padding-left: 12px; margin-left: 0;}
@@ -470,7 +681,11 @@ class _ArticlePageState extends State<ArticlePage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('A MI IDŐNK'),
-        actions: [IconButton(icon: Icon(saved ? Icons.bookmark : Icons.bookmark_border), onPressed: _toggleSaved)],
+        actions: [
+          IconButton(tooltip: 'Cikk megosztása', icon: const Icon(Icons.share_outlined),
+            onPressed: () => Share.share((widget.post['link'] ?? baseUrl).toString(), subject: title)),
+          IconButton(icon: Icon(saved ? Icons.bookmark : Icons.bookmark_border), onPressed: _toggleSaved),
+        ],
       ),
       body: Column(children: [
         Padding(
@@ -488,7 +703,24 @@ class _ArticlePageState extends State<ArticlePage> {
             ),
           ]),
         ),
-        Expanded(child: WebViewWidget(controller: controller)),
+        Expanded(child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onHorizontalDragStart: (details) => swipeStartX = details.globalPosition.dx,
+          onHorizontalDragEnd: (details) {
+            final velocity = details.primaryVelocity ?? 0;
+            if (velocity < -300) _navigateArticle(1);
+            if (velocity > 300) _navigateArticle(-1);
+          },
+          child: WebViewWidget(controller: controller),
+        )),
+        if (widget.posts != null && widget.index != null)
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            TextButton.icon(onPressed: widget.index! > 0 ? () => _navigateArticle(-1) : null,
+              icon: const Icon(Icons.chevron_left), label: const Text('Előző')),
+            Text('${widget.index! + 1} / ${widget.posts!.length}'),
+            TextButton.icon(onPressed: widget.index! < widget.posts!.length - 1 ? () => _navigateArticle(1) : null,
+              icon: const Icon(Icons.chevron_right), label: const Text('Következő')),
+          ]),
       ]),
     );
   }
