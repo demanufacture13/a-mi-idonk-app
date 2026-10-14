@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -11,6 +12,8 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:open_filex/open_filex.dart';
 import 'brand_star.dart';
 
 final GlobalKey<NavigatorState> notificationNavigatorKey =
@@ -166,6 +169,100 @@ class _NewsAppState extends State<NewsApp> {
     });
   }
 
+  Future<void> _downloadAndInstallUpdate(String url) async {
+    final navigatorContext = notificationNavigatorKey.currentContext;
+    if (navigatorContext == null || !navigatorContext.mounted) return;
+    final progress = ValueNotifier<double?>(null);
+    final status = ValueNotifier<String>('Kapcsolódás a letöltéshez…');
+    var dialogOpen = true;
+    showDialog<void>(
+      context: navigatorContext,
+      barrierDismissible: false,
+      builder: (context) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('Frissítés letöltése'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ValueListenableBuilder<String>(
+                valueListenable: status,
+                builder: (_, text, __) => Text(text),
+              ),
+              const SizedBox(height: 16),
+              ValueListenableBuilder<double?>(
+                valueListenable: progress,
+                builder: (_, value, __) => LinearProgressIndicator(value: value),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ).then((_) => dialogOpen = false);
+
+    final client = http.Client();
+    File? apkFile;
+    try {
+      final request = http.Request('GET', Uri.parse(url));
+      final response = await client.send(request).timeout(const Duration(seconds: 30));
+      if (response.statusCode != 200) {
+        throw Exception('Letöltési hiba: HTTP ${response.statusCode}');
+      }
+      final length = response.contentLength;
+      final directory = await getTemporaryDirectory();
+      apkFile = File('${directory.path}/A_MI_IDONK_frissites.apk');
+      final sink = apkFile.openWrite();
+      var received = 0;
+      try {
+        await for (final chunk in response.stream.timeout(const Duration(seconds: 45))) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (length != null && length > 0) {
+            progress.value = (received / length).clamp(0.0, 1.0);
+            status.value = 'Letöltés: ${(100 * received / length).clamp(0, 100).toStringAsFixed(0)}%';
+          } else {
+            status.value = 'Letöltve: ${(received / 1048576).toStringAsFixed(1)} MB';
+          }
+        }
+      } finally {
+        await sink.close();
+      }
+      if (received < 1024 * 100 || (length != null && received != length)) {
+        throw Exception('A letöltött fájl hiányos.');
+      }
+      final header = await apkFile.openRead(0, 4).first;
+      if (header.length < 4 || header[0] != 0x50 || header[1] != 0x4b) {
+        throw Exception('A letöltött fájl nem APK.');
+      }
+      status.value = 'Android telepítő indítása…';
+      if (dialogOpen && navigatorContext.mounted) {
+        Navigator.of(navigatorContext, rootNavigator: true).pop();
+        dialogOpen = false;
+      }
+      final result = await OpenFilex.open(
+        apkFile.path,
+        type: 'application/vnd.android.package-archive',
+      );
+      if (result.type != ResultType.done) {
+        throw Exception(result.message);
+      }
+    } catch (error) {
+      debugPrint('Frissítés letöltése / telepítése: $error');
+      if (dialogOpen && navigatorContext.mounted) {
+        Navigator.of(navigatorContext, rootNavigator: true).pop();
+        dialogOpen = false;
+      }
+      if (navigatorContext.mounted) {
+        ScaffoldMessenger.of(navigatorContext).showSnackBar(
+          SnackBar(content: Text('Nem sikerült elindítani a frissítést: $error')),
+        );
+      }
+    } finally {
+      client.close();
+      // Az APK-t megtartjuk az Android telepítő számára.
+    }
+  }
+
   Future<void> _checkForUpdates() async {
     try {
       final package = await PackageInfo.fromPlatform();
@@ -178,21 +275,20 @@ class _NewsAppState extends State<NewsApp> {
       final latest = (release['tag_name'] ?? '').toString();
       if (!_isNewerVersion(latest, package.version)) return;
 
-      // Elsősorban a közzétett APK közvetlen letöltési címe.
       String? apkUrl;
       final assets = release['assets'];
       if (assets is List) {
         for (final asset in assets) {
-          if (asset is Map &&
-              (asset['name'] ?? '').toString() == 'A_MI_IDONK.apk') {
+          if (asset is Map && (asset['name'] ?? '').toString() == 'A_MI_IDONK.apk') {
             apkUrl = asset['browser_download_url']?.toString();
             break;
           }
         }
       }
-      final releaseUrl = (release['html_url'] ?? '').toString();
-      final downloadUrl = apkUrl ?? releaseUrl;
-      if (!downloadUrl.startsWith('https://') || !mounted) return;
+      // Csak a konkrét kiadási APK-t töltjük le; weboldalt soha.
+      if (apkUrl == null ||
+          Uri.tryParse(apkUrl)?.scheme != 'https' ||
+          Uri.tryParse(apkUrl)?.host != 'github.com' || !mounted) return;
       final dialogContext = notificationNavigatorKey.currentContext;
       if (dialogContext == null || !dialogContext.mounted) return;
       await showDialog<void>(
@@ -201,17 +297,16 @@ class _NewsAppState extends State<NewsApp> {
           title: const Text('Új frissítés érhető el'),
           content: Text('Elérhető az A MI IDŐNK $latest verziója. '
               'A telepített verzió: ${package.version}. '
-              'Szeretnéd letölteni a frissítést?'),
+              'Szeretnéd letölteni és telepíteni a frissítést?'),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(),
               child: const Text('Később'),
             ),
             FilledButton(
-              onPressed: () async {
+              onPressed: () {
                 Navigator.of(context).pop();
-                await launchUrl(Uri.parse(downloadUrl),
-                    mode: LaunchMode.externalApplication);
+                _downloadAndInstallUpdate(apkUrl!);
               },
               child: const Text('Frissítés'),
             ),
@@ -219,7 +314,6 @@ class _NewsAppState extends State<NewsApp> {
         ),
       );
     } catch (error) {
-      // Internet nélkül is zavartalanul működik a hírolvasó.
       debugPrint('Frissítésellenőrzés nem sikerült: $error');
     }
   }
