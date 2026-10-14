@@ -220,6 +220,9 @@ jobs:
             exit 1
           fi
 
+      - name: Gradle fájlfigyelés kikapcsolása
+        run: echo "org.gradle.vfs.watch=false" >> amiidonk_apk_build/android/gradle.properties
+
       - name: APK elkészítése
         working-directory: amiidonk_apk_build
         env:
