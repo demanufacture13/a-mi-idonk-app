@@ -490,7 +490,7 @@ class _HomePageState extends State<HomePage> {
           ? (v) => widget.onCategoryNotificationsChanged(id, v) : null,
       );
     }),
-    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.3'),
+    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.5'),
   ]);
 }
 
@@ -627,9 +627,27 @@ class _ArticlePageState extends State<ArticlePage> {
   final tts=FlutterTts();
   bool speaking=false, saved=false;
   int fontSize = 18;
-  double swipeStartX = 0;
+  late final WebViewController controller;
   String get id => '${widget.post['id']}';
-  @override void initState(){super.initState();_load();tts.setLanguage('hu-HU');tts.setSpeechRate(0.48);tts.setCompletionHandler(() { if (mounted) setState(() => speaking = false); });}
+  @override
+  void initState() {
+    super.initState();
+    controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.disabled);
+    _load();
+    tts.setLanguage('hu-HU');
+    tts.setSpeechRate(0.48);
+    tts.setCompletionHandler(() {
+      if (mounted) setState(() => speaking = false);
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _renderArticleHtml();
+  }
+
   Future<void> _load() async {
     final p = await SharedPreferences.getInstance();
     final seen = p.getStringList('read_articles') ?? [];
@@ -638,10 +656,13 @@ class _ArticlePageState extends State<ArticlePage> {
       if (seen.length > 1500) seen.removeRange(0, seen.length - 1500);
       await p.setStringList('read_articles', seen);
     }
-    if (mounted) setState(() {
-      saved = (p.getStringList('saved') ?? []).contains(id);
-      fontSize = p.getInt('article_font_size') ?? 18;
-    });
+    if (mounted) {
+      setState(() {
+        saved = (p.getStringList('saved') ?? []).contains(id);
+        fontSize = p.getInt('article_font_size') ?? 18;
+      });
+      _renderArticleHtml();
+    }
   }
   void _navigateArticle(int direction) {
     final list = widget.posts;
@@ -656,8 +677,7 @@ class _ArticlePageState extends State<ArticlePage> {
   Future<void> _toggleSaved() async {final p=await SharedPreferences.getInstance();final ids=p.getStringList('saved')??[];if(ids.contains(id)){ids.remove(id);}else{ids.add(id);await p.setString('article_$id',jsonEncode(widget.post));}await p.setStringList('saved',ids);setState(()=>saved=ids.contains(id));}
   Future<void> _toggleTts() async {if(speaking){await tts.stop();setState(()=>speaking=false);}else{setState(()=>speaking=true);await tts.speak('${plain(widget.post['title']['rendered'] ?? '')}. ${plain(widget.post['content']['rendered'] ?? '')}');}}
   @override void dispose(){tts.stop();super.dispose();}
-  @override
-  Widget build(BuildContext context) {
+  void _renderArticleHtml() {
     final content = articleHtml((widget.post['content']?['rendered'] ?? '').toString());
     final title = plain((widget.post['title']?['rendered'] ?? '').toString());
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -674,10 +694,13 @@ class _ArticlePageState extends State<ArticlePage> {
         .replaceAll('FG', foreground)
         .replaceAll('TITLE', const HtmlEscape().convert(title))
         .replaceAll('CONTENT', content);
-    final controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.disabled)
-      ..setBackgroundColor(Theme.of(context).scaffoldBackgroundColor)
-      ..loadHtmlString(page, baseUrl: '$baseUrl/');
+    controller.setBackgroundColor(Theme.of(context).scaffoldBackgroundColor);
+    controller.loadHtmlString(page, baseUrl: '$baseUrl/');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final title = plain((widget.post['title']?['rendered'] ?? '').toString());
     return Scaffold(
       appBar: AppBar(
         title: const Text('A MI IDŐNK'),
@@ -703,16 +726,7 @@ class _ArticlePageState extends State<ArticlePage> {
             ),
           ]),
         ),
-        Expanded(child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onHorizontalDragStart: (details) => swipeStartX = details.globalPosition.dx,
-          onHorizontalDragEnd: (details) {
-            final velocity = details.primaryVelocity ?? 0;
-            if (velocity < -300) _navigateArticle(1);
-            if (velocity > 300) _navigateArticle(-1);
-          },
-          child: WebViewWidget(controller: controller),
-        )),
+        Expanded(child: WebViewWidget(controller: controller)),
         if (widget.posts != null && widget.index != null)
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
             TextButton.icon(onPressed: widget.index! > 0 ? () => _navigateArticle(-1) : null,
