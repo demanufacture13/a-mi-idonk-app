@@ -9,6 +9,7 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'brand_star.dart';
 
 final GlobalKey<NavigatorState> notificationNavigatorKey =
@@ -118,6 +119,27 @@ Future<void> openNotificationArticle(RemoteMessage message) async {
   }
 }
 
+// A nyilvános GitHub Releases legújabb kiadásának ellenőrzése.
+const githubLatestReleaseApi =
+    'https://api.github.com/repos/demanufacture13/a-mi-idonk-app/releases/latest';
+
+List<int>? _versionParts(String version) {
+  final match = RegExp(r'^v?(\d+)\.(\d+)\.(\d+)(?:[+\-].*)?$')
+      .firstMatch(version.trim());
+  if (match == null) return null;
+  return [for (var i = 1; i <= 3; i++) int.parse(match.group(i)!)];
+}
+
+bool _isNewerVersion(String available, String installed) {
+  final a = _versionParts(available);
+  final b = _versionParts(installed);
+  if (a == null || b == null) return false;
+  for (var i = 0; i < 3; i++) {
+    if (a[i] != b[i]) return a[i] > b[i];
+  }
+  return false;
+}
+
 class NewsApp extends StatefulWidget {
   const NewsApp({super.key});
   @override State<NewsApp> createState() => _NewsAppState();
@@ -135,7 +157,66 @@ class _NewsAppState extends State<NewsApp> {
     _load();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializeNotifications();
+      _checkForUpdates();
     });
+  }
+
+  Future<void> _checkForUpdates() async {
+    try {
+      final package = await PackageInfo.fromPlatform();
+      final response = await http.get(
+        Uri.parse(githubLatestReleaseApi),
+        headers: {'Accept': 'application/vnd.github+json'},
+      ).timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200 || !mounted) return;
+      final release = jsonDecode(response.body) as Map<String, dynamic>;
+      final latest = (release['tag_name'] ?? '').toString();
+      if (!_isNewerVersion(latest, package.version)) return;
+
+      // Elsősorban a közzétett APK közvetlen letöltési címe.
+      String? apkUrl;
+      final assets = release['assets'];
+      if (assets is List) {
+        for (final asset in assets) {
+          if (asset is Map &&
+              (asset['name'] ?? '').toString() == 'A_MI_IDONK.apk') {
+            apkUrl = asset['browser_download_url']?.toString();
+            break;
+          }
+        }
+      }
+      final releaseUrl = (release['html_url'] ?? '').toString();
+      final downloadUrl = apkUrl ?? releaseUrl;
+      if (!downloadUrl.startsWith('https://') || !mounted) return;
+      final dialogContext = notificationNavigatorKey.currentContext;
+      if (dialogContext == null || !dialogContext.mounted) return;
+      await showDialog<void>(
+        context: dialogContext,
+        builder: (context) => AlertDialog(
+          title: const Text('Új frissítés érhető el'),
+          content: Text('Elérhető az A MI IDŐNK $latest verziója. '
+              'A telepített verzió: ${package.version}. '
+              'Szeretnéd letölteni a frissítést?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Később'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await launchUrl(Uri.parse(downloadUrl),
+                    mode: LaunchMode.externalApplication);
+              },
+              child: const Text('Frissítés'),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      // Internet nélkül is zavartalanul működik a hírolvasó.
+      debugPrint('Frissítésellenőrzés nem sikerült: $error');
+    }
   }
 
   Future<void> _load() async {
@@ -310,7 +391,7 @@ class _HomePageState extends State<HomePage> {
       value: widget.notificationsEnabled,
       onChanged: widget.notificationsBusy ? null : widget.onNotificationsChanged,
     ),
-    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.0'),
+    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.2'),
   ]);
 }
 
