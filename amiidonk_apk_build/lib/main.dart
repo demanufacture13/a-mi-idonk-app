@@ -584,7 +584,7 @@ class _HomePageState extends State<HomePage> {
           ? (v) => widget.onCategoryNotificationsChanged(id, v) : null,
       );
     }),
-    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.5'),
+    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.7'),
   ]);
 }
 
