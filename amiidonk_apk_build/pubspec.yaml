@@ -1,5 +1,5 @@
 name: amiidonk
-version: 1.0.5+5
+version: 1.0.6+6
 description: A MI IDŐNK hírolvasó Androidra és iOS-re
 publish_to: none
 environment:
@@ -17,6 +17,8 @@ dependencies:
   firebase_messaging: ^16.0.0
   package_info_plus: ^8.0.0
   share_plus: ^10.1.4
+  path_provider: ^2.1.5
+  open_filex: ^4.7.0
 flutter:
   uses-material-design: true
 dev_dependencies:
