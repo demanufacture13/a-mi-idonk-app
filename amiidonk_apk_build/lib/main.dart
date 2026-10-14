@@ -20,6 +20,8 @@ final GlobalKey<NavigatorState> notificationNavigatorKey =
     GlobalKey<NavigatorState>();
 
 const baseUrl = 'https://www.amiidonk.hu';
+const facebookPageUrl = 'https://www.facebook.com/amiidonk';
+const articleShareActionUrl = 'https://www.amiidonk.hu/?ami_app_share=1';
 const brandRed = Color(0xFFD20A12);
 // Állítsd be a hírlevél tényleges feliratkozási URL-jét az élesítés előtt.
 const newsletterUrl = '$baseUrl';
@@ -562,6 +564,7 @@ class _HomePageState extends State<HomePage> {
     const ListTile(title: Text('Cikkek betűmérete', style: TextStyle(fontWeight: FontWeight.bold))),
     const ArticleFontSizeSetting(),
     const Divider(),ListTile(leading:const Icon(Icons.mail_outline),title:const Text('Hírlevél-feliratkozás'),subtitle:const Text('Feliratkozás a weboldalon'),onTap:()=>launchUrl(Uri.parse(newsletterUrl),mode:LaunchMode.externalApplication)),
+    ListTile(leading: const Icon(Icons.facebook), title: const Text('Facebook-oldalunk'), subtitle: const Text('A MI IDŐNK a Facebookon'), trailing: const Icon(Icons.open_in_new), onTap: () => launchUrl(Uri.parse(facebookPageUrl), mode: LaunchMode.externalApplication)),
     SwitchListTile(
       secondary: const Icon(Icons.notifications_outlined),
       title: const Text('Új cikkek értesítései'),
@@ -727,7 +730,16 @@ class _ArticlePageState extends State<ArticlePage> {
   void initState() {
     super.initState();
     controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.disabled);
+      ..setJavaScriptMode(JavaScriptMode.disabled)
+      ..setNavigationDelegate(NavigationDelegate(
+        onNavigationRequest: (request) {
+          if (request.url == articleShareActionUrl) {
+            _shareArticle();
+            return NavigationDecision.prevent;
+          }
+          return NavigationDecision.navigate;
+        },
+      ));
     _load();
     tts.setLanguage('hu-HU');
     tts.setSpeechRate(0.48);
@@ -768,6 +780,11 @@ class _ArticlePageState extends State<ArticlePage> {
       builder: (_) => ArticlePage(post: list[next], posts: list, index: next)));
   }
 
+  Future<void> _shareArticle() async {
+    final title = plain((widget.post['title']?['rendered'] ?? '').toString());
+    await Share.share((widget.post['link'] ?? baseUrl).toString(), subject: title);
+  }
+
   Future<void> _toggleSaved() async {final p=await SharedPreferences.getInstance();final ids=p.getStringList('saved')??[];if(ids.contains(id)){ids.remove(id);}else{ids.add(id);await p.setString('article_$id',jsonEncode(widget.post));}await p.setStringList('saved',ids);setState(()=>saved=ids.contains(id));}
   Future<void> _toggleTts() async {if(speaking){await tts.stop();setState(()=>speaking=false);}else{setState(()=>speaking=true);await tts.speak('${plain(widget.post['title']['rendered'] ?? '')}. ${plain(widget.post['content']['rendered'] ?? '')}');}}
   @override void dispose(){tts.stop();super.dispose();}
@@ -783,7 +800,8 @@ class _ArticlePageState extends State<ArticlePage> {
       p {margin: 0 0 1.1em;} h1,h2,h3,h4 {line-height: 1.3; margin-top: 1.4em;}
       a {color: #d20a12;} blockquote {border-left: 4px solid #d20a12; padding-left: 12px; margin-left: 0;}
       figcaption {font-size: 0.85em; opacity: 0.75;} table {max-width: 100%; display: block; overflow-x: auto;}
-    </style></head><body><h1>TITLE</h1>CONTENT</body></html>'''
+      .share-end {display: block; box-sizing: border-box; width: 100%; margin: 30px 0 16px; padding: 16px; border-radius: 12px; background: #d20a12; color: white !important; font-size: 19px; font-weight: bold; text-align: center; text-decoration: none;}
+    </style></head><body><h1>TITLE</h1>CONTENT<a class="share-end" href="https://www.amiidonk.hu/?ami_app_share=1">Megosztás</a></body></html>'''
         .replaceAll('BG', background)
         .replaceAll('FG', foreground)
         .replaceAll('TITLE', const HtmlEscape().convert(title))
@@ -794,13 +812,12 @@ class _ArticlePageState extends State<ArticlePage> {
 
   @override
   Widget build(BuildContext context) {
-    final title = plain((widget.post['title']?['rendered'] ?? '').toString());
     return Scaffold(
       appBar: AppBar(
         title: const Text('A MI IDŐNK'),
         actions: [
           IconButton(tooltip: 'Cikk megosztása', icon: const Icon(Icons.share_outlined),
-            onPressed: () => Share.share((widget.post['link'] ?? baseUrl).toString(), subject: title)),
+            onPressed: _shareArticle),
           IconButton(icon: Icon(saved ? Icons.bookmark : Icons.bookmark_border), onPressed: _toggleSaved),
         ],
       ),
