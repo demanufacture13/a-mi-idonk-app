@@ -279,7 +279,7 @@ class _NewsAppState extends State<NewsApp> {
       final assets = release['assets'];
       if (assets is List) {
         for (final asset in assets) {
-          if (asset is Map && (asset['name'] ?? '').toString() == 'A_MI_IDONK.apk') {
+          if (asset is Map && (asset['name'] ?? '').toString() == 'app-release.apk') {
             apkUrl = asset['browser_download_url']?.toString();
             break;
           }
