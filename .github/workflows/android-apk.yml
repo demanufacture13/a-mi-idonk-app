@@ -1,96 +1,108 @@
-name: A MI IDŐNK - Android APK
-
-on:
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Kiadás verziója (például v1.0.0); üresen csak APK készül'
-        required: false
-        type: string
-        default: ''
-  push:
-    branches:
-      - main
-
-permissions:
-  contents: write
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Projekt letöltése
-        uses: actions/checkout@v4
-
-      - name: Java telepítése
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Flutter telepítése
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-
-      - name: Flutter projekt előkészítése
-        working-directory: amiidonk_apk_build
-        run: |
-          flutter create --platforms=android .
-          flutter pub get
-
-      - name: Alkalmazás nevének beállítása
-        working-directory: amiidonk_apk_build
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          p = Path("android/app/src/main/AndroidManifest.xml")
-          s = p.read_text()
-          s = re.sub(r'android:label="[^"]*"', 'android:label="A MI IDŐNK"', s, count=1)
-          p.write_text(s)
+          plugin = 'id("com.google.gms.google-services") version "4.4.4" apply false'
+          if plugin not in s:
+              s = s.replace('plugins {', 'plugins {\n    ' + plugin, 1)
+          settings.write_text(s)
+          app = Path("android/app/build.gradle.kts")
+          s = app.read_text()
+          plugin = 'id("com.google.gms.google-services")'
+          if plugin not in s:
+              s = s.replace('plugins {', 'plugins {\n    ' + plugin, 1)
+          app.write_text(s)
           PY
 
-      - name: Alkalmazásikon elkészítése
-        working-directory: amiidonk_apk_build
-        run: dart run flutter_launcher_icons
-
-      - name: Firebase konfiguráció hozzáadása
+      - name: Állandó aláírókulcs előkészítése
         working-directory: amiidonk_apk_build
         env:
-          FIREBASE_CONFIG: ${{ secrets.FIREBASE_CONFIG }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          printf '%s' "$FIREBASE_CONFIG" > android/app/google-services.json
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            echo "Hiányzik az ANDROID_KEYSTORE_BASE64 vagy ANDROID_KEY_PASSWORD GitHub Secret."
+            exit 1
+          fi
+          mkdir -p android/app
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/amiidonk-release.jks
+          test -s android/app/amiidonk-release.jks
+          keytool -list -keystore android/app/amiidonk-release.jks -storepass "$ANDROID_KEY_PASSWORD" -alias amiidonk > /dev/null
 
-      - name: Internetengedély hozzáadása
+      - name: Android release aláírás beállítása
         working-directory: amiidonk_apk_build
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path("android/app/src/main/AndroidManifest.xml")
+          p = Path('android/app/build.gradle.kts')
           s = p.read_text()
-          permission = '<uses-permission android:name="android.permission.INTERNET"/>'
-          if permission not in s:
-              s = s.replace("<application", permission + "\n    <application", 1)
+          if 'signingConfigs.getByName("debug")' not in s:
+              raise SystemExit('Nem található a Flutter alapértelmezett debug aláírási sora; biztonságos leállás.')
+          s = s.replace(
+              'signingConfigs.getByName("debug")',
+              'signingConfigs.getByName("release")',
+              1
+          )
+          marker = '    buildTypes {'
+          if marker not in s:
+              raise SystemExit('Nem található az Android buildTypes blokk.')
+          signing = '''    signingConfigs {
+              create("release") {
+                  storeFile = file("amiidonk-release.jks")
+                  storePassword = System.getenv("ANDROID_KEY_PASSWORD")
+                  keyAlias = "amiidonk"
+                  keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+              }
+          }
+          '''
+          s = s.replace(marker, signing + marker, 1)
           p.write_text(s)
           PY
 
-      - name: Háttérlejátszás Android-engedélyei
-        working-directory: amiidonk_apk_build
+      - name: Kiadási verzió ellenőrzése
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' }}
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          python3 - <<'PYMANIFEST'
-          from pathlib import Path
-          p = Path('android/app/src/main/AndroidManifest.xml')
-          s = p.read_text()
-          for permission in (
-              'android.permission.FOREGROUND_SERVICE',
-              'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
-              'android.permission.WAKE_LOCK',
-              'android.permission.POST_NOTIFICATIONS',
-          ):
-              line = f'<uses-permission android:name="{permission}" />'
-              if permission not in s:
-                  s = s.replace('<application', line + '\n    <application', 1)
-          service = ('<service android:name="id.flutter.flutter_background_service.BackgroundService" '
-                     'android:foregroundServiceType="mediaPlayback" '
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "A verzió formátuma legyen például v1.0.0"
+            exit 1
+          fi
+
+      - name: Gradle fájlfigyelés kikapcsolása
+        run: echo "org.gradle.vfs.watch=false" >> amiidonk_apk_build/android/gradle.properties
+
+      - name: APK elkészítése
+        working-directory: amiidonk_apk_build
+        env:
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            flutter build apk --release --build-name "${RELEASE_TAG#v}" --build-number "$BUILD_NUMBER"
+          else
+            flutter build apk --release --build-number "$BUILD_NUMBER"
+          fi
+
+      - name: APK feltöltése
+        uses: actions/upload-artifact@v4
+        with:
+          name: A_MI_IDONK_Redmi_Pad_2_APK
+          path: amiidonk_apk_build/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+      - name: APK közzététele GitHub Releases oldalon
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          APK="amiidonk_apk_build/build/app/outputs/flutter-apk/app-release.apk"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$APK#A_MI_IDONK.apk" --clobber
+            gh release edit "$RELEASE_TAG" --draft=false
+          else
+            gh release create "$RELEASE_TAG" "$APK#A_MI_IDONK.apk" \
+              --target "$GITHUB_SHA" \
+              --title "A MI IDŐNK – ${RELEASE_TAG#v}" \
+              --notes "A MI IDŐNK Android alkalmazás új verziója." \
+              --latest
+          fi
