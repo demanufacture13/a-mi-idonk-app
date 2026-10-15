@@ -7,6 +7,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_background_service_android/flutter_background_service_android.dart';
+import 'package:flutter/services.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -29,6 +32,7 @@ const newsletterUrl = '$baseUrl';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
+  if (Platform.isAndroid) await configureListeningService();
   runApp(const NewsApp());
 }
 
@@ -718,6 +722,165 @@ class NewsTile extends StatelessWidget {
 // Hírek hallgatása: a cikkeket a WordPress nyilvános REST API-jából tölti.
 // A háttérben történő, képernyőzár melletti lejátszáshoz később Android
 // foreground media service és médiavezérlő integráció szükséges.
+// A Hallgatás TTS-folyamata Android foreground service-ben fut.
+// A háttér-isolate önállóan léptet a szakaszok és cikkek között.
+@pragma('vm:entry-point')
+void listeningServiceEntry(ServiceInstance service) async {
+  DartPluginRegistrant.ensureInitialized();
+  final tts = FlutterTts();
+  List<dynamic> queue = [];
+  List<String> segments = [];
+  int article = 0, segment = 0, generation = 0;
+  double rate = 0.48;
+  bool playing = false;
+  await tts.setLanguage('hu-HU');
+
+  List<String> splitText(dynamic item) {
+    final text = '${plain((item['title']?['rendered'] ?? '').toString())}. '
+        '${plain((item['content']?['rendered'] ?? '').toString())}';
+    final sentences = text.split(RegExp(r'(?<=[.!?])\s+'));
+    final result = <String>[];
+    var buffer = '';
+    for (final sentence in sentences) {
+      if (buffer.isNotEmpty && buffer.length + sentence.length > 220) {
+        result.add(buffer.trim()); buffer = '';
+      }
+      if (sentence.length > 220) {
+        if (buffer.isNotEmpty) { result.add(buffer.trim()); buffer = ''; }
+        for (var i = 0; i < sentence.length; i += 220) {
+          result.add(sentence.substring(i, i + 220 > sentence.length ? sentence.length : i + 220));
+        }
+      } else { buffer += '$sentence '; }
+    }
+    if (buffer.trim().isNotEmpty) result.add(buffer.trim());
+    return result;
+  }
+
+  void publish() {
+    service.invoke('listen_state', {
+      'article': article, 'segment': segment,
+      'playing': playing, 'count': segments.length,
+      'finishedId': null,
+    });
+    if (service is AndroidServiceInstance) {
+      final title = queue.isNotEmpty && article < queue.length
+          ? plain('${queue[article]['title']?['rendered'] ?? ''}') : 'A MI IDŐNK';
+      service.setForegroundNotificationInfo(
+        title: 'A MI IDŐNK – Hallgatás',
+        content: playing ? title : 'Felolvasás szüneteltetve',
+      );
+    }
+  }
+
+  Future<void> speak() async {
+    if (!playing || segment >= segments.length) return;
+    final token = generation;
+    await tts.setSpeechRate(rate);
+    if (token != generation || !playing) return;
+    await tts.speak(segments[segment]);
+  }
+
+  tts.setCompletionHandler(() async {
+    if (!playing) return;
+    if (segment + 1 < segments.length) {
+      segment++;
+    } else {
+      if (queue.isNotEmpty && article < queue.length) {
+        service.invoke('listen_heard', {'id': '${queue[article]['id']}'});
+      }
+      article++;
+      segment = 0;
+      if (article >= queue.length) {
+        playing = false;
+        publish();
+        return;
+      }
+      segments = splitText(queue[article]);
+    }
+    publish();
+    await speak();
+  });
+  tts.setErrorHandler((_) { playing = false; publish(); });
+
+  service.on('listen_start').listen((data) async {
+    generation++;
+    playing = false;
+    await tts.stop();
+    if (data == null) return;
+    queue = (data['queue'] as List?) ?? [];
+    article = (data['article'] as num?)?.toInt() ?? 0;
+    segment = (data['segment'] as num?)?.toInt() ?? 0;
+    rate = (data['rate'] as num?)?.toDouble() ?? 0.48;
+    if (queue.isEmpty || article < 0 || article >= queue.length) return;
+    segments = splitText(queue[article]);
+    playing = true;
+    publish();
+    await speak();
+  });
+  service.on('listen_pause').listen((_) async {
+    generation++;
+    playing = false;
+    await tts.stop();
+    publish();
+  });
+  service.on('listen_resume').listen((_) async {
+    if (queue.isEmpty || article >= queue.length) return;
+    if (segment >= segments.length) segment = 0;
+    playing = true;
+    publish();
+    await speak();
+  });
+  service.on('listen_seek').listen((data) async {
+    generation++;
+    final resume = playing;
+    playing = false;
+    await tts.stop();
+    if (data != null) {
+      article = ((data['article'] as num?)?.toInt() ?? article).clamp(0, queue.isEmpty ? 0 : queue.length - 1);
+      if (queue.isNotEmpty) segments = splitText(queue[article]);
+      segment = ((data['segment'] as num?)?.toInt() ?? 0).clamp(0, segments.isEmpty ? 0 : segments.length - 1);
+    }
+    playing = resume;
+    publish();
+    if (playing) await speak();
+  });
+  service.on('listen_rate').listen((data) async {
+    generation++;
+    final resume = playing;
+    playing = false;
+    await tts.stop();
+    rate = (data?['rate'] as num?)?.toDouble() ?? rate;
+    playing = resume;
+    publish();
+    if (playing) await speak();
+  });
+  service.on('listen_stop').listen((_) async {
+    generation++;
+    playing = false;
+    await tts.stop();
+    queue = []; segments = []; article = 0; segment = 0;
+    publish();
+    service.stopSelf();
+  });
+  publish();
+}
+
+Future<void> configureListeningService() async {
+  final service = FlutterBackgroundService();
+  await service.configure(
+    androidConfiguration: AndroidConfiguration(
+      onStart: listeningServiceEntry,
+      autoStart: false,
+      isForegroundMode: true,
+      notificationChannelId: 'amiidonk_listening',
+      initialNotificationTitle: 'A MI IDŐNK – Hallgatás',
+      initialNotificationContent: 'A felolvasás előkészítése',
+      foregroundServiceNotificationId: 1414,
+    ),
+    iosConfiguration: IosConfiguration(autoStart: false),
+  );
+}
+
 class ListeningPage extends StatefulWidget {
   const ListeningPage({super.key});
   @override
@@ -746,10 +909,48 @@ class _ListeningPageState extends State<ListeningPage> {
   List<String> _segments = [];
   String? _error;
   int _playbackGeneration = 0;
+  StreamSubscription<Map<String, dynamic>?>? _backgroundState;
+  StreamSubscription<Map<String, dynamic>?>? _backgroundHeard;
+  bool get _androidBackground => Platform.isAndroid;
+  final FlutterBackgroundService _background = FlutterBackgroundService();
+
+  Future<void> _sendBackgroundStart() async {
+    if (!await _background.isRunning()) await _background.startService();
+    // A szolgáltatás elindulása aszinkron; a konfiguráció után rövid idő kellhet.
+    await Future<void>.delayed(const Duration(milliseconds: 450));
+    _background.invoke('listen_start', {
+      'queue': _queue, 'article': _articleIndex,
+      'segment': _segmentIndex, 'rate': _rate,
+    });
+  }
+
 
   @override
   void initState() {
     super.initState();
+    if (_androidBackground) {
+      _backgroundState = _background.on('listen_state').listen((data) {
+        if (!mounted || data == null) return;
+        final index = (data['article'] as num?)?.toInt() ?? _articleIndex;
+        if (index < 0 || index >= _queue.length) return;
+        setState(() {
+          _articleIndex = index;
+          _segmentIndex = (data['segment'] as num?)?.toInt() ?? _segmentIndex;
+          _playing = data['playing'] == true;
+          _paused = !_playing;
+        });
+        _prepareSegments();
+      });
+      _backgroundHeard = _background.on('listen_heard').listen((data) async {
+        if (data == null) return;
+        final id = '${data['id']}';
+        final prefs = await SharedPreferences.getInstance();
+        final heard = prefs.getStringList('listened_articles') ?? [];
+        if (!heard.contains(id)) heard.add(id);
+        if (heard.length > 1000) heard.removeRange(0, heard.length - 1000);
+        await prefs.setStringList('listened_articles', heard);
+      });
+    }
     _tts.setLanguage('hu-HU');
     _tts.setSpeechRate(_rate);
     _tts.setCompletionHandler(_onSegmentComplete);
@@ -1027,7 +1228,11 @@ class _ListeningPageState extends State<ListeningPage> {
     final generation = _playbackGeneration;
     await _tts.setSpeechRate(_rate);
     if (!mounted || !_playing || generation != _playbackGeneration) return;
-    await _tts.speak(_segments[_segmentIndex]);
+    if (_androidBackground) {
+      await _sendBackgroundStart();
+    } else {
+      await _tts.speak(_segments[_segmentIndex]);
+    }
   }
 
   Future<void> _stop({bool reset = false}) async {
@@ -1036,7 +1241,15 @@ class _ListeningPageState extends State<ListeningPage> {
       _playing = false; _paused = !reset;
       if (reset) _segmentIndex = 0;
     });
-    await _tts.stop();
+    if (_androidBackground) {
+      if (reset) {
+        _background.invoke('listen_stop');
+      } else {
+        _background.invoke('listen_pause');
+      }
+    } else {
+      await _tts.stop();
+    }
   }
 
   Future<void> _toggle() async {
@@ -1082,7 +1295,7 @@ class _ListeningPageState extends State<ListeningPage> {
   }
 
   @override
-  void dispose() { _playbackGeneration++; _archiveSearch.dispose(); _tts.stop(); super.dispose(); }
+  void dispose() { _playbackGeneration++; _archiveSearch.dispose(); _backgroundState?.cancel(); _backgroundHeard?.cancel(); _tts.stop(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
