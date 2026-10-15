@@ -533,11 +533,12 @@ class _HomePageState extends State<HomePage> {
   void reload() => posts=NewsApi.posts(category:category,search:search);
   @override Widget build(BuildContext context) => Scaffold(
     appBar:AppBar(title:const Row(mainAxisSize:MainAxisSize.min,children:[BrandStar(size:32),SizedBox(width:8),Flexible(child:Text('A MI IDŐNK',style:TextStyle(fontWeight:FontWeight.w900),overflow:TextOverflow.ellipsis))]),actions:[IconButton(icon:const Icon(Icons.search),onPressed:()=>showSearch(context:context,delegate:NewsSearchDelegate()))]),
-    body: tab == 0 ? _news() : tab == 1 ? _categories() : tab == 2 ? const SavedPage() : _settings(),
+    body: tab == 0 ? _news() : tab == 1 ? _categories() : tab == 2 ? const SavedPage() : tab == 3 ? const ListeningPage() : _settings(),
     bottomNavigationBar:NavigationBar(selectedIndex:tab,onDestinationSelected:(v)=>setState(()=>tab=v),destinations:const [
       NavigationDestination(icon:Icon(Icons.home_outlined),selectedIcon:Icon(Icons.home),label:'Hírek'),
       NavigationDestination(icon:Icon(Icons.category_outlined),label:'Kategóriák'),
       NavigationDestination(icon:Icon(Icons.bookmark_outline),label:'Kedvencek'),
+      NavigationDestination(icon:Icon(Icons.headphones_outlined),selectedIcon:Icon(Icons.headphones),label:'Hallgatás'),
       NavigationDestination(icon:Icon(Icons.settings_outlined),label:'Beállítások'),
     ]),
   );
@@ -587,7 +588,7 @@ class _HomePageState extends State<HomePage> {
           ? (v) => widget.onCategoryNotificationsChanged(id, v) : null,
       );
     }),
-    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.7'),
+    const AboutListTile(applicationName:'A MI IDŐNK',applicationVersion:'1.0.12'),
   ]);
 }
 
@@ -709,6 +710,343 @@ class NewsTile extends StatelessWidget {
           ]),
         ),
       ),
+    );
+  }
+}
+
+
+// Hírek hallgatása: a cikkeket a WordPress nyilvános REST API-jából tölti.
+// A háttérben történő, képernyőzár melletti lejátszáshoz később Android
+// foreground media service és médiavezérlő integráció szükséges.
+class ListeningPage extends StatefulWidget {
+  const ListeningPage({super.key});
+  @override
+  State<ListeningPage> createState() => _ListeningPageState();
+}
+
+class _ListeningPageState extends State<ListeningPage> {
+  final FlutterTts _tts = FlutterTts();
+  List<dynamic> _categories = [];
+  List<dynamic> _articles = [];
+  List<dynamic> _queue = [];
+  Set<int> _selected = {};
+  bool _loading = true, _playing = false, _paused = false;
+  bool _shuffle = false, _skipHeard = false;
+  int _limit = 10, _articleIndex = 0, _segmentIndex = 0;
+  double _rate = 0.48;
+  List<String> _segments = [];
+  String? _error;
+  int _playbackGeneration = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _tts.setLanguage('hu-HU');
+    _tts.setSpeechRate(_rate);
+    _tts.setCompletionHandler(_onSegmentComplete);
+    _tts.setErrorHandler((message) {
+      if (mounted) setState(() { _playing = false; _paused = true; });
+    });
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cats = await NewsApi.categories();
+      final uri = Uri.parse('$baseUrl/wp-json/wp/v2/posts').replace(
+        queryParameters: {'per_page':'100', '_embed':'1'});
+      final response = await http.get(uri).timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200) throw Exception('HTTP ${response.statusCode}');
+      final articles = jsonDecode(response.body) as List<dynamic>;
+      if (!mounted) return;
+      setState(() {
+        _categories = cats;
+        _articles = articles;
+        _selected = (prefs.getStringList('listen_categories') ?? [])
+            .map(int.tryParse).whereType<int>().toSet();
+        _selected.removeWhere((id) => !cats.any((c) => c['id'] == id));
+        _shuffle = prefs.getBool('listen_shuffle') ?? false;
+        _skipHeard = prefs.getBool('listen_skip_heard') ?? false;
+        _limit = [5, 10, 20, 50, 100].contains(prefs.getInt('listen_limit')) ? prefs.getInt('listen_limit')! : 10;
+        _rate = prefs.getDouble('listen_rate') ?? 0.48;
+        _loading = false;
+      });
+      await _tts.setSpeechRate(_rate);
+      await _buildQueue();
+    } catch (e) {
+      if (mounted) setState(() { _loading = false; _error = 'Nem sikerült betölteni a híreket: $e'; });
+    }
+  }
+
+  Future<void> _saveSettings() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setStringList('listen_categories', _selected.map((x) => '$x').toList());
+    await p.setBool('listen_shuffle', _shuffle);
+    await p.setBool('listen_skip_heard', _skipHeard);
+    await p.setInt('listen_limit', _limit);
+    await p.setDouble('listen_rate', _rate);
+  }
+
+  Future<void> _buildQueue() async {
+    await _stop(reset: true);
+    final p = await SharedPreferences.getInstance();
+    final heard = (p.getStringList('listened_articles') ?? []).toSet();
+    final filtered = _articles.where((a) {
+      final ids = (a['categories'] as List? ?? []).whereType<int>();
+      final matches = _selected.isEmpty || ids.any(_selected.contains);
+      return matches && (!_skipHeard || !heard.contains('${a['id']}'));
+    }).take(_limit).toList();
+    if (_shuffle) filtered.shuffle();
+    if (!mounted) return;
+    setState(() { _queue = filtered; _articleIndex = 0; _segmentIndex = 0; });
+    _prepareSegments();
+  }
+
+  void _prepareSegments() {
+    if (_articleIndex >= _queue.length) { _segments = []; return; }
+    final a = _queue[_articleIndex];
+    final text = '${plain((a['title']?['rendered'] ?? '').toString())}. '
+        '${plain((a['content']?['rendered'] ?? '').toString())}';
+    final sentences = text.split(RegExp(r'(?<=[.!?])\s+'));
+    final parts = <String>[];
+    var buffer = '';
+    for (final sentence in sentences) {
+      if (buffer.isNotEmpty && buffer.length + sentence.length > 220) {
+        parts.add(buffer.trim()); buffer = '';
+      }
+      if (sentence.length > 220) {
+        if (buffer.isNotEmpty) { parts.add(buffer.trim()); buffer = ''; }
+        for (var i = 0; i < sentence.length; i += 220) {
+          parts.add(sentence.substring(i, (i + 220 > sentence.length ? sentence.length : i + 220)));
+        }
+      } else { buffer += '$sentence '; }
+    }
+    if (buffer.trim().isNotEmpty) parts.add(buffer.trim());
+    _segments = parts;
+  }
+
+  Future<void> _markHeard() async {
+    if (_articleIndex >= _queue.length) return;
+    final p = await SharedPreferences.getInstance();
+    final ids = p.getStringList('listened_articles') ?? [];
+    final id = '${_queue[_articleIndex]['id']}';
+    if (!ids.contains(id)) ids.add(id);
+    if (ids.length > 1000) ids.removeRange(0, ids.length - 1000);
+    await p.setStringList('listened_articles', ids);
+  }
+
+  void _onSegmentComplete() {
+    if (!mounted || !_playing) return;
+    if (_segmentIndex + 1 < _segments.length) {
+      setState(() => _segmentIndex++);
+      _speak();
+    } else {
+      _markHeard();
+      if (_articleIndex + 1 < _queue.length) {
+        setState(() { _articleIndex++; _segmentIndex = 0; });
+        _prepareSegments();
+        _speak();
+      } else {
+        setState(() { _playing = false; _paused = false; });
+      }
+    }
+  }
+
+  Future<void> _speak() async {
+    if (!_playing || _segmentIndex >= _segments.length) return;
+    final generation = _playbackGeneration;
+    await _tts.setSpeechRate(_rate);
+    if (!mounted || !_playing || generation != _playbackGeneration) return;
+    await _tts.speak(_segments[_segmentIndex]);
+  }
+
+  Future<void> _stop({bool reset = false}) async {
+    _playbackGeneration++;
+    if (mounted) setState(() {
+      _playing = false; _paused = !reset;
+      if (reset) _segmentIndex = 0;
+    });
+    await _tts.stop();
+  }
+
+  Future<void> _toggle() async {
+    if (_playing) { await _stop(); return; }
+    if (_queue.isEmpty) return;
+    if (_segmentIndex >= _segments.length) _segmentIndex = 0;
+    setState(() { _playing = true; _paused = false; });
+    await _speak();
+  }
+
+  Future<void> _jumpArticle(int delta) async {
+    if (_queue.isEmpty) return;
+    final next = (_articleIndex + delta).clamp(0, _queue.length - 1).toInt();
+    final resume = _playing;
+    await _stop(reset: true);
+    if (!mounted) return;
+    setState(() { _articleIndex = next; _segmentIndex = 0; _playing = resume; _paused = !resume; });
+    _prepareSegments();
+    if (resume) await _speak();
+  }
+
+  Future<void> _seek(double fraction) async {
+    if (_segments.isEmpty) return;
+    final resume = _playing;
+    await _stop();
+    if (!mounted) return;
+    setState(() {
+      _segmentIndex = (fraction * (_segments.length - 1)).round().clamp(0, _segments.length - 1);
+      _playing = resume;
+      _paused = !resume;
+    });
+    if (resume) await _speak();
+  }
+
+  Future<void> _changeRate(double value) async {
+    final resume = _playing;
+    await _stop();
+    if (!mounted) return;
+    setState(() { _rate = value; _playing = resume; _paused = !resume; });
+    await _tts.setSpeechRate(value);
+    await _saveSettings();
+    if (resume) await _speak();
+  }
+
+  @override
+  void dispose() { _playbackGeneration++; _tts.stop(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    const red = Color(0xFFD20A12);
+    const panel = Color(0xFF292929);
+    const muted = Color(0xFFBBBBBB);
+    final current = _queue.isNotEmpty && _articleIndex < _queue.length
+        ? _queue[_articleIndex] : null;
+    final fraction = _segments.isEmpty ? 0.0 :
+        (_segmentIndex / _segments.length).clamp(0.0, 1.0);
+    return Container(
+      color: const Color(0xFF171717),
+      child: _loading ? const Center(child: CircularProgressIndicator(color: red)) :
+      _error != null ? Center(child: Padding(padding: const EdgeInsets.all(20),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text(_error!, style: const TextStyle(color: Colors.white), textAlign: TextAlign.center),
+          TextButton(onPressed: () { setState(() { _loading = true; _error = null; }); _load(); }, child: const Text('Újrapróbálás')),
+        ]))) : ListView(padding: const EdgeInsets.all(16), children: [
+        const Row(children: [Icon(Icons.headphones, color: red, size: 30), SizedBox(width: 12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('A MI IDŐNK', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 20)),
+            Text('HÍREK HALLGATÁSA', style: TextStyle(color: muted, fontSize: 12, letterSpacing: 1.5)),
+          ]))]),
+        const SizedBox(height: 18),
+        Card(color: panel, child: Padding(padding: const EdgeInsets.all(14), child:
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Milyen témákat hallgatnál?', style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            const Text('Kiválaszthatsz több kategóriát. Ha egyet sem jelölsz, minden kategória szerepel.', style: TextStyle(color: muted, fontSize: 12)),
+            const SizedBox(height: 8),
+            Wrap(spacing: 6, runSpacing: 2, children: _categories.map((c) {
+              final id = c['id'] as int;
+              final selected = _selected.contains(id);
+              return FilterChip(
+                label: Text(plain('${c['name']}')),
+                selected: selected,
+                selectedColor: red,
+                checkmarkColor: Colors.white,
+                labelStyle: TextStyle(color: selected ? Colors.white : Colors.black87),
+                onSelected: (yes) async {
+                  setState(() { if (yes) { _selected.add(id); } else { _selected.remove(id); } });
+                  await _saveSettings(); await _buildQueue();
+                },
+              );
+            }).toList()),
+            const SizedBox(height: 8),
+            Row(children: [
+              const Text('Cikkek száma', style: TextStyle(color: Colors.white)),
+              const Spacer(),
+              DropdownButton<int>(value: _limit, dropdownColor: panel,
+                style: const TextStyle(color: Colors.white),
+                items: [5, 10, 20, 50, 100].map((n) => DropdownMenuItem(value: n, child: Text('$n cikk'))).toList(),
+                onChanged: (n) async { if (n == null) return; setState(() => _limit = n); await _saveSettings(); await _buildQueue(); }),
+            ]),
+            SwitchListTile.adaptive(contentPadding: EdgeInsets.zero,
+              title: const Text('Shuffle – véletlen sorrend', style: TextStyle(color: Colors.white)),
+              activeTrackColor: red, value: _shuffle,
+              onChanged: (v) async { setState(() => _shuffle = v); await _saveSettings(); await _buildQueue(); }),
+            SwitchListTile.adaptive(contentPadding: EdgeInsets.zero,
+              title: const Text('Meghallgatott cikkek kihagyása', style: TextStyle(color: Colors.white)),
+              activeTrackColor: red, value: _skipHeard,
+              onChanged: (v) async { setState(() => _skipHeard = v); await _saveSettings(); await _buildQueue(); }),
+          ]))),
+        const SizedBox(height: 12),
+        Card(color: panel, child: Padding(padding: const EdgeInsets.all(14), child:
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [const Expanded(child: Text('Lejátszási lista', style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold))),
+              Text('${_queue.length} cikk', style: const TextStyle(color: muted))]),
+            if (_queue.isEmpty) const Padding(padding: EdgeInsets.symmetric(vertical: 14),
+              child: Text('Nincs megjeleníthető cikk. Válassz másik kategóriát, vagy kapcsold ki a meghallgatott cikkek kihagyását.', style: TextStyle(color: muted))),
+            ..._queue.asMap().entries.map((entry) {
+              final i = entry.key; final a = entry.value;
+              final active = i == _articleIndex;
+              return ListTile(contentPadding: EdgeInsets.zero, dense: true,
+                leading: Icon(active ? Icons.graphic_eq : Icons.article_outlined, color: active ? red : muted),
+                title: Text(plain('${a['title']?['rendered'] ?? ''}'), maxLines: 2, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: Colors.white, fontWeight: active ? FontWeight.bold : FontWeight.normal)),
+                onTap: () async {
+                  final resume = _playing; await _stop(reset: true);
+                  if (!mounted) return;
+                  setState(() { _articleIndex = i; _segmentIndex = 0; _playing = resume; });
+                  _prepareSegments(); if (resume) await _speak();
+                },
+              );
+            }),
+          ]))),
+        const SizedBox(height: 12),
+        Card(color: panel, child: Padding(padding: const EdgeInsets.all(16), child:
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('MOST HALLGATOD', style: TextStyle(color: muted, fontSize: 11, letterSpacing: 1.2)),
+            const SizedBox(height: 8),
+            Text(current == null ? 'Válassz egy cikket' : plain('${current['title']?['rendered'] ?? ''}'),
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 17)),
+            const SizedBox(height: 10),
+            Slider(value: fraction, activeColor: red, inactiveColor: Colors.white24,
+              onChanged: current == null ? null : _seek),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text('${(fraction * 100).round()}% • ${_segmentIndex + (current == null ? 0 : 1)}/${_segments.length} szakasz', style: const TextStyle(color: muted, fontSize: 12)),
+              Text('${_articleIndex + (current == null ? 0 : 1)}/${_queue.length} cikk', style: const TextStyle(color: muted, fontSize: 12)),
+            ]),
+            const SizedBox(height: 8),
+            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              IconButton(onPressed: current == null ? null : () => _seek((fraction - 0.1).clamp(0.0, 1.0)),
+                icon: const Icon(Icons.replay_10, color: Colors.white)),
+              IconButton(onPressed: current == null ? null : () => _jumpArticle(-1),
+                icon: const Icon(Icons.skip_previous, color: Colors.white, size: 30)),
+              IconButton.filled(onPressed: current == null ? null : _toggle,
+                style: IconButton.styleFrom(backgroundColor: red, padding: const EdgeInsets.all(16)),
+                icon: Icon(_playing ? Icons.pause : Icons.play_arrow, color: Colors.white, size: 30)),
+              IconButton(onPressed: current == null ? null : () => _jumpArticle(1),
+                icon: const Icon(Icons.skip_next, color: Colors.white, size: 30)),
+              IconButton(onPressed: current == null ? null : () => _seek((fraction + 0.1).clamp(0.0, 1.0)),
+                icon: const Icon(Icons.forward_10, color: Colors.white)),
+            ]),
+            const SizedBox(height: 8),
+            Row(children: [
+              const Icon(Icons.speed, color: muted), const SizedBox(width: 8),
+              const Text('Sebesség', style: TextStyle(color: Colors.white)),
+              const Spacer(),
+              DropdownButton<double>(value: _rate, dropdownColor: panel,
+                style: const TextStyle(color: Colors.white),
+                items: const [
+                  DropdownMenuItem(value: 0.36, child: Text('0,75×')),
+                  DropdownMenuItem(value: 0.48, child: Text('1×')),
+                  DropdownMenuItem(value: 0.60, child: Text('1,25×')),
+                  DropdownMenuItem(value: 0.72, child: Text('1,5×')),
+                ],
+                onChanged: (v) { if (v != null) _changeRate(v); }),
+            ]),
+            const Text('A tekerés szövegszakaszok között történik, nem másodpercre pontosan.', style: TextStyle(color: muted, fontSize: 11)),
+          ]))),
+        const SizedBox(height: 16),
+      ]),
     );
   }
 }
