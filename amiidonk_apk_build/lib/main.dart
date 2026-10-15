@@ -729,6 +729,15 @@ class _ListeningPageState extends State<ListeningPage> {
   List<dynamic> _categories = [];
   List<dynamic> _articles = [];
   List<dynamic> _queue = [];
+  final List<dynamic> _archiveQueue = [];
+  final TextEditingController _archiveSearch = TextEditingController();
+  List<dynamic> _archiveResults = [];
+  bool _archiveLoading = false;
+  bool _archiveSearched = false;
+  bool _archiveHasMore = false;
+  String? _archiveError;
+  int _archivePage = 0;
+  int? _archiveYear;
   Set<int> _selected = {};
   bool _loading = true, _playing = false, _paused = false;
   bool _shuffle = false, _skipHeard = false;
@@ -798,9 +807,169 @@ class _ListeningPageState extends State<ListeningPage> {
       return matches && (!_skipHeard || !heard.contains('${a['id']}'));
     }).take(_limit).toList();
     if (_shuffle) filtered.shuffle();
+    final existingIds = filtered.map((a) => a['id']).toSet();
+    for (final article in _archiveQueue) {
+      if (existingIds.add(article['id'])) filtered.add(article);
+    }
     if (!mounted) return;
     setState(() { _queue = filtered; _articleIndex = 0; _segmentIndex = 0; });
     _prepareSegments();
+  }
+
+  Future<void> _searchArchive({bool more = false}) async {
+    if (_archiveLoading) return;
+    final term = _archiveSearch.text.trim();
+    if (term.isEmpty) {
+      setState(() { _archiveError = 'Írj be egy keresőkifejezést.'; _archiveSearched = false; });
+      return;
+    }
+    final page = more ? _archivePage + 1 : 1;
+    setState(() {
+      _archiveLoading = true;
+      _archiveError = null;
+      if (!more) { _archiveResults = []; _archiveHasMore = false; }
+    });
+    try {
+      final q = <String,String>{
+        'search': term, 'per_page': '20', 'page': '$page', '_embed': '1',
+        'orderby': 'date', 'order': 'desc',
+      };
+      if (_selected.isNotEmpty) q['categories'] = _selected.join(',');
+      if (_archiveYear != null) {
+        q['after'] = '${_archiveYear!}-01-01T00:00:00';
+        q['before'] = '${_archiveYear!}-12-31T23:59:59';
+      }
+      final uri = Uri.parse('$baseUrl/wp-json/wp/v2/posts').replace(queryParameters: q);
+      final response = await http.get(uri).timeout(const Duration(seconds: 22));
+      if (response.statusCode != 200) {
+        throw Exception('A keresés nem sikerült (HTTP ${response.statusCode}).');
+      }
+      final items = jsonDecode(response.body) as List<dynamic>;
+      final totalPages = int.tryParse(response.headers['x-wp-totalpages'] ?? '') ?? page;
+      if (!mounted) return;
+      setState(() {
+        _archiveResults = more ? [..._archiveResults, ...items] : items;
+        _archivePage = page;
+        _archiveHasMore = page < totalPages;
+        _archiveSearched = true;
+      });
+    } catch (e) {
+      if (mounted) setState(() => _archiveError = '$e');
+    } finally {
+      if (mounted) setState(() => _archiveLoading = false);
+    }
+  }
+
+  void _addArchiveArticle(dynamic article, {bool playNow = false}) {
+    final id = article['id'];
+    if (!_queue.any((a) => a['id'] == id)) {
+      _archiveQueue.add(article);
+      setState(() => _queue.add(article));
+    }
+    if (playNow) {
+      final index = _queue.indexWhere((a) => a['id'] == id);
+      _playArchiveAt(index);
+    }
+  }
+
+  Future<void> _playArchiveAt(int index) async {
+    if (index < 0 || index >= _queue.length) return;
+    await _stop(reset: true);
+    if (!mounted) return;
+    setState(() { _articleIndex = index; _segmentIndex = 0; _playing = true; _paused = false; });
+    _prepareSegments();
+    await _speak();
+  }
+
+  Widget _archiveFinder() {
+    const red = Color(0xFFD20A12);
+    const muted = Color(0xFFBBBBBB);
+    final now = DateTime.now().year;
+    return Card(color: const Color(0xFF292929), child: Padding(
+      padding: const EdgeInsets.all(14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Row(children: [Icon(Icons.manage_search, color: red), SizedBox(width: 8),
+          Expanded(child: Text('Keresés a teljes cikkarchívumban',
+            style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold)))]),
+        const SizedBox(height: 8),
+        const Text('Régi cikkeket is megtalálhatsz, és hozzáadhatod a lejátszási listádhoz.',
+          style: TextStyle(color: muted, fontSize: 12)),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _archiveSearch,
+          style: const TextStyle(color: Colors.white),
+          textInputAction: TextInputAction.search,
+          onSubmitted: (_) => _searchArchive(),
+          decoration: InputDecoration(
+            hintText: 'Cím, téma vagy kulcsszó...',
+            hintStyle: const TextStyle(color: muted),
+            prefixIcon: const Icon(Icons.search, color: muted),
+            filled: true, fillColor: const Color(0xFF1B1B1B),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Row(children: [
+          const Text('Megjelenés éve:', style: TextStyle(color: Colors.white70)),
+          const SizedBox(width: 12),
+          Expanded(child: DropdownButton<int?>(
+            isExpanded: true, value: _archiveYear,
+            dropdownColor: const Color(0xFF292929),
+            style: const TextStyle(color: Colors.white),
+            items: [
+              const DropdownMenuItem<int?>(value: null, child: Text('Bármelyik év')),
+              for (var year = now; year >= 2000; year--)
+                DropdownMenuItem<int?>(value: year, child: Text('$year')),
+            ],
+            onChanged: (v) => setState(() => _archiveYear = v),
+          )),
+        ]),
+        const Text('A fent kijelölt kategóriákra is szűr. Ha nincs kijelölés, mindegyikben keres.',
+          style: TextStyle(color: muted, fontSize: 11)),
+        const SizedBox(height: 8),
+        SizedBox(width: double.infinity, child: FilledButton.icon(
+          style: FilledButton.styleFrom(backgroundColor: red),
+          onPressed: _archiveLoading ? null : () => _searchArchive(),
+          icon: const Icon(Icons.search), label: const Text('Cikkek keresése'),
+        )),
+        if (_archiveLoading) const Padding(padding: EdgeInsets.all(12),
+          child: Center(child: CircularProgressIndicator(color: red))),
+        if (_archiveError != null) Padding(padding: const EdgeInsets.only(top: 8),
+          child: Text(_archiveError!, style: const TextStyle(color: Colors.orangeAccent))),
+        if (_archiveSearched && !_archiveLoading && _archiveResults.isEmpty && _archiveError == null)
+          const Padding(padding: EdgeInsets.only(top: 12),
+            child: Text('Nincs találat. Próbálj másik kifejezést vagy évet.',
+              style: TextStyle(color: muted))),
+        if (_archiveResults.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Text('Találatok (${_archiveResults.length})',
+            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          for (final article in _archiveResults) ...[
+            const Divider(color: Colors.white12),
+            Text(plain('${article['title']?['rendered'] ?? ''}'),
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 3),
+            Text('${article['date'] ?? ''}'.split('T').first,
+              style: const TextStyle(color: muted, fontSize: 12)),
+            Row(children: [
+              TextButton.icon(
+                onPressed: _queue.any((a) => a['id'] == article['id']) ? null :
+                  () => _addArchiveArticle(article),
+                icon: Icon(_queue.any((a) => a['id'] == article['id']) ? Icons.check : Icons.playlist_add),
+                label: Text(_queue.any((a) => a['id'] == article['id']) ? 'Listában' : 'Listához adom'),
+              ),
+              const SizedBox(width: 6),
+              TextButton.icon(onPressed: () => _addArchiveArticle(article, playNow: true),
+                icon: const Icon(Icons.play_arrow), label: const Text('Meghallgatom')),
+            ]),
+          ],
+          if (_archiveHasMore) Center(child: OutlinedButton.icon(
+            onPressed: _archiveLoading ? null : () => _searchArchive(more: true),
+            icon: const Icon(Icons.expand_more), label: const Text('További találatok'),
+          )),
+        ],
+      ]),
+    ));
   }
 
   void _prepareSegments() {
@@ -913,7 +1082,7 @@ class _ListeningPageState extends State<ListeningPage> {
   }
 
   @override
-  void dispose() { _playbackGeneration++; _tts.stop(); super.dispose(); }
+  void dispose() { _playbackGeneration++; _archiveSearch.dispose(); _tts.stop(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
@@ -977,6 +1146,8 @@ class _ListeningPageState extends State<ListeningPage> {
               activeTrackColor: red, value: _skipHeard,
               onChanged: (v) async { setState(() => _skipHeard = v); await _saveSettings(); await _buildQueue(); }),
           ]))),
+        const SizedBox(height: 12),
+        _archiveFinder(),
         const SizedBox(height: 12),
         Card(color: panel, child: Padding(padding: const EdgeInsets.all(14), child:
           Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
