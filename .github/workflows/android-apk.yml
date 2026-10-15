@@ -70,15 +70,35 @@ jobs:
           from pathlib import Path
           p = Path("android/app/src/main/AndroidManifest.xml")
           s = p.read_text()
-          permissions = [
-              '<uses-permission android:name="android.permission.INTERNET"/>',
-              '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>',
-          ]
-          for permission in permissions:
-              if permission not in s:
-                  s = s.replace("<application", permission + "\n    <application", 1)
+          permission = '<uses-permission android:name="android.permission.INTERNET"/>'
+          if permission not in s:
+              s = s.replace("<application", permission + "\n    <application", 1)
           p.write_text(s)
           PY
+
+      - name: Háttérlejátszás Android-engedélyei
+        working-directory: amiidonk_apk_build
+        run: |
+          python3 - <<'PYMANIFEST'
+          from pathlib import Path
+          p = Path('android/app/src/main/AndroidManifest.xml')
+          s = p.read_text()
+          for permission in (
+              'android.permission.FOREGROUND_SERVICE',
+              'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
+              'android.permission.WAKE_LOCK',
+              'android.permission.POST_NOTIFICATIONS',
+          ):
+              line = f'<uses-permission android:name="{permission}" />'
+              if permission not in s:
+                  s = s.replace('<application', line + '\n    <application', 1)
+          service = ('<service android:name="id.flutter.flutter_background_service.BackgroundService" '
+                     'android:foregroundServiceType="mediaPlayback" '
+                     'android:exported="false" />')
+          if 'id.flutter.flutter_background_service.BackgroundService' not in s:
+              s = s.replace('</application>', '    ' + service + '\n    </application>', 1)
+          p.write_text(s)
+          PYMANIFEST
 
       - name: Értesítési ikon elkészítése
         working-directory: amiidonk_apk_build
