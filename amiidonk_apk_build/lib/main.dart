@@ -721,38 +721,95 @@ class ArticlePage extends StatefulWidget {
   @override State<ArticlePage> createState()=>_ArticlePageState();
 }
 class _ArticlePageState extends State<ArticlePage> {
-  final tts=FlutterTts();
-  bool speaking=false, saved=false;
-  int fontSize = 18;
+  final FlutterTts tts = FlutterTts();
+  bool saved = false, playing = false, paused = false, playerExpanded = true;
+  int fontSize = 18, segmentIndex = 0;
+  double readingProgress = 0, speechRate = 0.48;
+  List<String> segments = [];
+  List<dynamic> related = [];
   late final WebViewController controller;
   String get id => '${widget.post['id']}';
+  String get articleTitle => plain((widget.post['title']?['rendered'] ?? '').toString());
+
   @override
   void initState() {
     super.initState();
+    _prepareSegments();
     controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.disabled)
-      ..setNavigationDelegate(NavigationDelegate(
-        onNavigationRequest: (request) {
-          if (request.url == articleShareActionUrl) {
-            _shareArticle();
-            return NavigationDecision.prevent;
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..addJavaScriptChannel('ReadingProgress', onMessageReceived: (message) {
+        final value = double.tryParse(message.message);
+        if (value != null && mounted) setState(() => readingProgress = value.clamp(0.0, 1.0));
+      })
+      ..setNavigationDelegate(NavigationDelegate(onNavigationRequest: (request) {
+        if (request.url.startsWith(articleShareActionUrl)) {
+          _shareArticle();
+          return NavigationDecision.prevent;
+        }
+        if (request.url.contains('ami_app_related=')) {
+          final target = Uri.tryParse(request.url)?.queryParameters['ami_app_related'];
+          for (final item in related) {
+            if ('${item['id']}' == target) {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => ArticlePage(post: item)));
+              break;
+            }
           }
-          return NavigationDecision.navigate;
-        },
-      ));
+          return NavigationDecision.prevent;
+        }
+        return NavigationDecision.navigate;
+      }));
     _load();
+    _loadRelated();
     tts.setLanguage('hu-HU');
-    tts.setSpeechRate(0.48);
+    tts.setSpeechRate(speechRate);
     tts.setCompletionHandler(() {
-      if (mounted) setState(() => speaking = false);
+      if (!mounted || !playing) return;
+      if (segmentIndex + 1 < segments.length) {
+        setState(() => segmentIndex++);
+        _speakCurrent();
+      } else {
+        setState(() { playing = false; paused = false; segmentIndex = segments.length; });
+      }
+    });
+    tts.setErrorHandler((message) {
+      if (mounted) setState(() { playing = false; paused = true; });
     });
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _renderArticleHtml();
+  void _prepareSegments() {
+    final text = '$articleTitle. ${plain((widget.post['content']?['rendered'] ?? '').toString())}';
+    final sentences = text.split(RegExp(r'(?<=[.!?])\s+'));
+    segments = [];
+    var current = '';
+    for (final sentence in sentences) {
+      if (current.length + sentence.length > 220 && current.isNotEmpty) {
+        segments.add(current.trim());
+        current = '';
+      }
+      if (sentence.length > 220) {
+        if (current.isNotEmpty) { segments.add(current.trim()); current = ''; }
+        for (var i = 0; i < sentence.length; i += 220) {
+          segments.add(sentence.substring(i, i + 220 > sentence.length ? sentence.length : i + 220));
+        }
+      } else { current += '$sentence '; }
+    }
+    if (current.trim().isNotEmpty) segments.add(current.trim());
   }
+
+  Future<void> _loadRelated() async {
+    try {
+      final categories = widget.post['categories'];
+      if (categories is! List || categories.isEmpty) return;
+      final result = await NewsApi.posts(category: categories.first is int ? categories.first as int : int.tryParse('${categories.first}'));
+      if (mounted) {
+        setState(() => related = result.where((p) => '${p['id']}' != id).take(3).toList());
+        _renderArticleHtml();
+      }
+    } catch (_) { /* A cikk a kapcsolódó ajánlások nélkül is olvasható. */ }
+  }
+
+  @override
+  void didChangeDependencies() { super.didChangeDependencies(); _renderArticleHtml(); }
 
   Future<void> _load() async {
     final p = await SharedPreferences.getInstance();
@@ -763,92 +820,151 @@ class _ArticlePageState extends State<ArticlePage> {
       await p.setStringList('read_articles', seen);
     }
     if (mounted) {
-      setState(() {
-        saved = (p.getStringList('saved') ?? []).contains(id);
-        fontSize = p.getInt('article_font_size') ?? 18;
-      });
+      setState(() { saved = (p.getStringList('saved') ?? []).contains(id); fontSize = p.getInt('article_font_size') ?? 18; });
       _renderArticleHtml();
     }
   }
+
   void _navigateArticle(int direction) {
-    final list = widget.posts;
-    final index = widget.index;
+    final list = widget.posts; final index = widget.index;
     if (list == null || index == null) return;
     final next = index + direction;
     if (next < 0 || next >= list.length) return;
-    Navigator.of(context).pushReplacement(MaterialPageRoute(
-      builder: (_) => ArticlePage(post: list[next], posts: list, index: next)));
+    Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ArticlePage(post: list[next], posts: list, index: next)));
   }
 
-  Future<void> _shareArticle() async {
-    final title = plain((widget.post['title']?['rendered'] ?? '').toString());
-    await Share.share((widget.post['link'] ?? baseUrl).toString(), subject: title);
+  Future<void> _shareArticle() async { await Share.share((widget.post['link'] ?? baseUrl).toString(), subject: articleTitle); }
+  Future<void> _toggleSaved() async {
+    final p = await SharedPreferences.getInstance();
+    final ids = p.getStringList('saved') ?? [];
+    if (ids.contains(id)) { ids.remove(id); } else { ids.add(id); await p.setString('article_$id', jsonEncode(widget.post)); }
+    await p.setStringList('saved', ids);
+    if (mounted) setState(() => saved = ids.contains(id));
   }
 
-  Future<void> _toggleSaved() async {final p=await SharedPreferences.getInstance();final ids=p.getStringList('saved')??[];if(ids.contains(id)){ids.remove(id);}else{ids.add(id);await p.setString('article_$id',jsonEncode(widget.post));}await p.setStringList('saved',ids);setState(()=>saved=ids.contains(id));}
-  Future<void> _toggleTts() async {if(speaking){await tts.stop();setState(()=>speaking=false);}else{setState(()=>speaking=true);await tts.speak('${plain(widget.post['title']['rendered'] ?? '')}. ${plain(widget.post['content']['rendered'] ?? '')}');}}
-  @override void dispose(){tts.stop();super.dispose();}
+  Future<void> _speakCurrent() async {
+    if (!playing || segmentIndex >= segments.length) return;
+    await tts.setSpeechRate(speechRate);
+    await tts.speak(segments[segmentIndex]);
+  }
+  Future<void> _togglePlayback() async {
+    if (playing) {
+      setState(() { playing = false; paused = true; });
+      await tts.stop();
+    } else {
+      if (segmentIndex >= segments.length) segmentIndex = 0;
+      setState(() { playing = true; paused = false; });
+      await _speakCurrent();
+    }
+  }
+  Future<void> _seekTo(double value) async {
+    final wasPlaying = playing;
+    setState(() { playing = false; segmentIndex = (value * segments.length).floor().clamp(0, segments.isEmpty ? 0 : segments.length - 1).toInt(); });
+    await tts.stop();
+    if (wasPlaying && mounted) { setState(() => playing = true); await _speakCurrent(); }
+  }
+  Future<void> _setRate(double value) async {
+    final wasPlaying = playing;
+    setState(() { speechRate = value; playing = false; });
+    await tts.stop();
+    await tts.setSpeechRate(value);
+    if (wasPlaying && mounted) { setState(() => playing = true); await _speakCurrent(); }
+  }
+  @override void dispose() { tts.stop(); super.dispose(); }
+
   void _renderArticleHtml() {
     final content = articleHtml((widget.post['content']?['rendered'] ?? '').toString());
-    final title = plain((widget.post['title']?['rendered'] ?? '').toString());
+    final title = const HtmlEscape().convert(articleTitle);
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final background = isDark ? '#121212' : '#ffffff';
     final foreground = isDark ? '#eeeeee' : '#222222';
+    final relatedHtml = related.isEmpty ? '' : '<section class="related"><h2>Kapcsolódó cikkek</h2>${related.map((p) {
+      final t = const HtmlEscape().convert(plain((p['title']?['rendered'] ?? '').toString()));
+      final image = imageFor(p);
+      final safeImage = const HtmlEscape(HtmlEscapeMode.attribute).convert(image);
+      return '<a class="related-item" href="$baseUrl/?ami_app_related=${p['id']}">${image.isEmpty ? '' : '<img src="$safeImage" alt="">'}<span>$t</span></a>';
+    }).join()}</section>';
     final page = '''<!doctype html><html lang="hu"><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
-      body {background: BG; color: FG; font-family: sans-serif; font-size: ${fontSize}px; line-height: 1.65; margin: 18px; overflow-wrap: break-word;}
-      img, video, iframe {max-width: 100%; height: auto;} img {display: block; margin-left: auto !important; margin-right: auto !important;} figure, .wp-block-image {max-width: 100%; margin: 16px auto !important; text-align: center !important;} figure img, .wp-block-image img {margin-left: auto !important; margin-right: auto !important;}
+      body {background: $background; color: $foreground; font-family: sans-serif; font-size: ${fontSize}px; line-height: 1.65; margin: 18px; overflow-wrap: break-word;}
+      img, video, iframe {max-width: 100%; height: auto;} img {display: block; margin-left: auto !important; margin-right: auto !important;} figure, .wp-block-image {max-width: 100%; margin: 16px auto !important; text-align: center !important;}
       p {margin: 0 0 1.1em;} h1,h2,h3,h4 {line-height: 1.3; margin-top: 1.4em;}
       a {color: #d20a12;} blockquote {border-left: 4px solid #d20a12; padding-left: 12px; margin-left: 0;}
       figcaption {font-size: 0.85em; opacity: 0.75;} table {max-width: 100%; display: block; overflow-x: auto;}
       .share-end {display: block; box-sizing: border-box; width: 100%; margin: 30px 0 16px; padding: 16px; border-radius: 12px; background: #d20a12; color: white !important; font-size: 19px; font-weight: bold; text-align: center; text-decoration: none;}
-    </style></head><body><h1>TITLE</h1>CONTENT<a class="share-end" href="https://www.amiidonk.hu/?ami_app_share=1">Megosztás</a></body></html>'''
-        .replaceAll('BG', background)
-        .replaceAll('FG', foreground)
-        .replaceAll('TITLE', const HtmlEscape().convert(title))
-        .replaceAll('CONTENT', content);
+      .related {margin-top: 32px; padding-top: 14px; border-top: 1px solid #8885;}
+      .related-item {display:flex; align-items:center; gap:12px; padding: 12px 0; text-decoration:none; border-bottom:1px solid #8883; font-weight:600;}
+      .related-item img {width:90px; height:65px; object-fit:cover; border-radius:8px; margin:0!important;}
+    </style></head><body><h1>$title</h1>$content<a class="share-end" href="$articleShareActionUrl">Megosztás</a>$relatedHtml
+    <script>function reportProgress(){var d=document.documentElement;var max=Math.max(1,d.scrollHeight-innerHeight);ReadingProgress.postMessage(String(Math.max(0,Math.min(1,scrollY/max))));}window.addEventListener('scroll',reportProgress,{passive:true});window.addEventListener('load',reportProgress);</script>
+    </body></html>''';
     controller.setBackgroundColor(Theme.of(context).scaffoldBackgroundColor);
     controller.loadHtmlString(page, baseUrl: '$baseUrl/');
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('A MI IDŐNK'),
-        actions: [
-          IconButton(tooltip: 'Cikk megosztása', icon: const Icon(Icons.share_outlined),
-            onPressed: _shareArticle),
-          IconButton(icon: Icon(saved ? Icons.bookmark : Icons.bookmark_border), onPressed: _toggleSaved),
-        ],
-      ),
-      body: Column(children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          child: Row(children: [
-            Expanded(child: FilledButton.icon(
-              onPressed: _toggleTts,
-              icon: Icon(speaking ? Icons.stop : Icons.volume_up),
-              label: Text(speaking ? 'Felolvasás leállítása' : 'Cikk felolvasása'),
-            )),
-            IconButton(
-              tooltip: 'Eredeti cikk megnyitása',
-              icon: const Icon(Icons.open_in_new),
-              onPressed: () => launchUrl(Uri.parse((widget.post['link'] ?? baseUrl).toString()), mode: LaunchMode.externalApplication),
-            ),
+  Widget _audioPlayer() {
+    final total = segments.length;
+    final progress = total == 0 ? 0.0 : (segmentIndex / total).clamp(0.0, 1.0);
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(10, 5, 10, 6),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(color: dark ? const Color(0xFF181818) : const Color(0xFF252525), borderRadius: BorderRadius.circular(18)),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Row(children: [
+          const Icon(Icons.headphones, color: brandRed), const SizedBox(width: 8),
+          const Expanded(child: Text('A MI IDŐNK  •  CIKKFELOLVASÓ', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12))),
+          IconButton(onPressed: () => setState(() => playerExpanded = !playerExpanded), icon: Icon(playerExpanded ? Icons.keyboard_arrow_down : Icons.keyboard_arrow_up, color: Colors.white), tooltip: playerExpanded ? 'Összecsukás' : 'Kinyitás'),
+        ]),
+        if (playerExpanded) ...[
+          Text(articleTitle, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+          SliderTheme(data: SliderTheme.of(context).copyWith(activeTrackColor: brandRed, thumbColor: brandRed, inactiveTrackColor: Colors.white30), child: Slider(value: progress, onChanged: total == 0 ? null : _seekTo)),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('${total == 0 ? 0 : segmentIndex + 1}. szakasz', style: const TextStyle(color: Colors.white70, fontSize: 12)), Text('$total szakasz', style: const TextStyle(color: Colors.white70, fontSize: 12))]),
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            IconButton(tooltip: 'Vissza 1 szakasszal', onPressed: () => _seekTo((segmentIndex - 1).clamp(0, total == 0 ? 0 : total - 1) / (total == 0 ? 1 : total)), icon: const Icon(Icons.skip_previous, color: Colors.white)),
+            const SizedBox(width: 8),
+            FilledButton.icon(style: FilledButton.styleFrom(backgroundColor: brandRed), onPressed: _togglePlayback, icon: Icon(playing ? Icons.pause : Icons.play_arrow), label: Text(playing ? 'Szünet' : paused ? 'Folytatás' : 'Lejátszás')),
+            const SizedBox(width: 8),
+            IconButton(tooltip: 'Előre 1 szakasszal', onPressed: () => _seekTo((segmentIndex + 1).clamp(0, total == 0 ? 0 : total - 1) / (total == 0 ? 1 : total)), icon: const Icon(Icons.skip_next, color: Colors.white)),
           ]),
-        ),
-        Expanded(child: WebViewWidget(controller: controller)),
-        if (widget.posts != null && widget.index != null)
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            TextButton.icon(onPressed: widget.index! > 0 ? () => _navigateArticle(-1) : null,
-              icon: const Icon(Icons.chevron_left), label: const Text('Előző')),
-            Text('${widget.index! + 1} / ${widget.posts!.length}'),
-            TextButton.icon(onPressed: widget.index! < widget.posts!.length - 1 ? () => _navigateArticle(1) : null,
-              icon: const Icon(Icons.chevron_right), label: const Text('Következő')),
+          Row(children: [
+            const Icon(Icons.speed, color: Colors.white70, size: 18),
+            const SizedBox(width: 8),
+            const Text('Sebesség', style: TextStyle(color: Colors.white70)),
+            const Spacer(),
+            DropdownButton<double>(dropdownColor: const Color(0xFF252525), value: speechRate, style: const TextStyle(color: Colors.white), underline: const SizedBox.shrink(), items: const [
+              DropdownMenuItem(value: 0.36, child: Text('0,75×')),
+              DropdownMenuItem(value: 0.48, child: Text('1×')),
+              DropdownMenuItem(value: 0.60, child: Text('1,25×')),
+              DropdownMenuItem(value: 0.72, child: Text('1,5×')),
+            ], onChanged: (value) { if (value != null) _setRate(value); }),
           ]),
+          const Text('A csúszka szövegszakaszok között léptet, nem másodperc pontossággal.', style: TextStyle(color: Colors.white54, fontSize: 10)),
+        ] else Row(children: [
+          Expanded(child: Text(articleTitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70))),
+          IconButton(onPressed: _togglePlayback, icon: Icon(playing ? Icons.pause_circle : Icons.play_circle, color: brandRed, size: 34)),
+        ]),
       ]),
     );
   }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('A MI IDŐNK'), actions: [
+      IconButton(tooltip: 'Cikk megosztása', icon: const Icon(Icons.share_outlined), onPressed: _shareArticle),
+      IconButton(icon: Icon(saved ? Icons.bookmark : Icons.bookmark_border), onPressed: _toggleSaved),
+    ]),
+    body: Column(children: [
+      LinearProgressIndicator(value: readingProgress, minHeight: 3, color: brandRed, backgroundColor: Colors.transparent),
+      Expanded(child: WebViewWidget(controller: controller)),
+      _audioPlayer(),
+      if (widget.posts != null && widget.index != null)
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          TextButton.icon(onPressed: widget.index! > 0 ? () => _navigateArticle(-1) : null, icon: const Icon(Icons.chevron_left), label: const Text('Előző')),
+          Text('${widget.index! + 1} / ${widget.posts!.length}'),
+          TextButton.icon(onPressed: widget.index! < widget.posts!.length - 1 ? () => _navigateArticle(1) : null, icon: const Icon(Icons.chevron_right), label: const Text('Következő')),
+        ]),
+    ]),
+  );
 }
 
 class SavedPage extends StatefulWidget {const SavedPage({super.key});@override State<SavedPage> createState()=>_SavedPageState();}
