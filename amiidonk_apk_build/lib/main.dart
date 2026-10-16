@@ -873,7 +873,8 @@ Future<void> configureListeningService() async {
       onStart: listeningServiceEntry,
       autoStart: false,
       isForegroundMode: true,
-      notificationChannelId: 'amiidonk_listening',
+      // Use the plugin's default Android notification channel.
+      // A custom channel ID must be created natively before startForeground.
       initialNotificationTitle: 'A MI IDŐNK – Hallgatás',
       initialNotificationContent: 'A felolvasás előkészítése',
       foregroundServiceNotificationId: 1414,
