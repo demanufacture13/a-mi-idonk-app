@@ -911,6 +911,7 @@ class _ListeningPageState extends State<ListeningPage> {
   List<String> _segments = [];
   String? _error;
   int _playbackGeneration = 0;
+  int? _pendingArticleIndex;
   StreamSubscription<Map<String, dynamic>?>? _backgroundState;
   StreamSubscription<Map<String, dynamic>?>? _backgroundHeard;
   bool get _androidBackground => Platform.isAndroid;
@@ -935,6 +936,12 @@ class _ListeningPageState extends State<ListeningPage> {
         if (!mounted || data == null) return;
         final index = (data['article'] as num?)?.toInt() ?? _articleIndex;
         if (index < 0 || index >= _queue.length) return;
+        // A korábbi cikk késve érkező állapotüzenete ne írja felül
+        // az újonnan kiválasztott cikket.
+        if (_pendingArticleIndex != null) {
+          if (index != _pendingArticleIndex || data['playing'] != true) return;
+          _pendingArticleIndex = null;
+        }
         setState(() {
           _articleIndex = index;
           _segmentIndex = (data['segment'] as num?)?.toInt() ?? _segmentIndex;
@@ -1079,6 +1086,7 @@ class _ListeningPageState extends State<ListeningPage> {
     if (index < 0 || index >= _queue.length) return;
     await _stop(reset: true);
     if (!mounted) return;
+    _pendingArticleIndex = _androidBackground ? index : null;
     setState(() { _articleIndex = index; _segmentIndex = 0; _playing = true; _paused = false; });
     _prepareSegments();
     await _speak();
@@ -1244,11 +1252,9 @@ class _ListeningPageState extends State<ListeningPage> {
       if (reset) _segmentIndex = 0;
     });
     if (_androidBackground) {
-      if (reset) {
-        _background.invoke('listen_stop');
-      } else {
-        _background.invoke('listen_pause');
-      }
+      // A service életben marad cikkváltáskor is: a stopSelf()
+      // aszinkron leállása elnyelhette a következő listen_start eseményt.
+      _background.invoke('listen_pause');
     } else {
       await _tts.stop();
     }
@@ -1258,6 +1264,7 @@ class _ListeningPageState extends State<ListeningPage> {
     if (_playing) { await _stop(); return; }
     if (_queue.isEmpty) return;
     if (_segmentIndex >= _segments.length) _segmentIndex = 0;
+    if (_androidBackground) _pendingArticleIndex = _articleIndex;
     setState(() { _playing = true; _paused = false; });
     await _speak();
   }
@@ -1268,6 +1275,7 @@ class _ListeningPageState extends State<ListeningPage> {
     final resume = _playing;
     await _stop(reset: true);
     if (!mounted) return;
+    _pendingArticleIndex = _androidBackground && resume ? next : null;
     setState(() { _articleIndex = next; _segmentIndex = 0; _playing = resume; _paused = !resume; });
     _prepareSegments();
     if (resume) await _speak();
@@ -1380,7 +1388,8 @@ class _ListeningPageState extends State<ListeningPage> {
                 onTap: () async {
                   final resume = _playing; await _stop(reset: true);
                   if (!mounted) return;
-                  setState(() { _articleIndex = i; _segmentIndex = 0; _playing = resume; });
+                  _pendingArticleIndex = _androidBackground && resume ? i : null;
+                  setState(() { _articleIndex = i; _segmentIndex = 0; _playing = resume; _paused = !resume; });
                   _prepareSegments(); if (resume) await _speak();
                 },
               );
